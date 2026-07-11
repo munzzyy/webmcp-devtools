@@ -1,0 +1,11 @@
+node_modules/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.crx
+*.pem
+web-ext-artifacts/

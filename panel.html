@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WebMCP</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="status-bar" aria-live="polite"></header>
+
+      <section id="tools-section" aria-label="WebMCP tools">
+        <div id="tools-toolbar">
+          <button id="refresh-btn" type="button">Refresh</button>
+          <span id="tools-count"></span>
+        </div>
+        <table id="tools-table">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Origin</th>
+              <th scope="col">Read-only</th>
+              <th scope="col">Untrusted content</th>
+              <th scope="col">Worst finding</th>
+            </tr>
+          </thead>
+          <tbody id="tools-tbody"></tbody>
+        </table>
+      </section>
+
+      <section id="detail-section" aria-label="Tool detail" hidden>
+        <h2 id="detail-name"></h2>
+        <p id="detail-description"></p>
+
+        <h3>Input schema</h3>
+        <pre id="detail-schema"></pre>
+
+        <h3>Diagnostics</h3>
+        <ul id="detail-findings"></ul>
+
+        <h3>Call this tool</h3>
+        <form id="execute-form">
+          <label for="execute-args">Arguments (JSON string)</label>
+          <textarea id="execute-args" rows="4" spellcheck="false">{}</textarea>
+          <div id="execute-error" role="alert"></div>
+          <button type="submit">Execute</button>
+        </form>
+        <h3>Last result</h3>
+        <pre id="execute-result"></pre>
+      </section>
+
+      <section id="timeline-section" aria-label="Call history timeline">
+        <div id="timeline-toolbar">
+          <h2>Timeline</h2>
+          <button id="clear-timeline-btn" type="button">Clear</button>
+        </div>
+        <ol id="timeline-list"></ol>
+      </section>
+    </div>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,385 @@
+/* panel.css
+ *
+ * Two explicit palettes (`.theme-light` / `.theme-dark`, toggled in panel.js
+ * from chrome.devtools.panels.themeName) instead of relying on
+ * prefers-color-scheme, so the panel matches the actual DevTools theme the
+ * user picked rather than guessing from the OS.
+ *
+ * Severity colors are solid fills paired with a fixed text color chosen for
+ * contrast against THAT fill (not against the page background), each
+ * verified >= 4.5:1 (WCAG AA, small text) -- see the badge rules below.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+body.theme-light {
+  --bg: #ffffff;
+  --bg-alt: #f3f4f6;
+  --fg: #1f2933;
+  --fg-muted: #4b5563;
+  --border: #d1d5db;
+  --accent: #1d4ed8;
+  --ok: #15803d;
+  --err: #b91c1c;
+}
+
+body.theme-dark {
+  --bg: #111111;
+  --bg-alt: #1f2933;
+  --fg: #e5e7eb;
+  --fg-muted: #9ca3af;
+  --border: #374151;
+  --accent: #60a5fa;
+  --ok: #4ade80;
+  --err: #f87171;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+header#status-bar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-badge {
+  display: inline-block;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  width: fit-content;
+}
+
+.status-pending {
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+}
+
+.status-present {
+  background: #14532d;
+  color: #ffffff;
+}
+
+.status-absent {
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+}
+
+.empty-state {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  max-width: 60ch;
+}
+
+section {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow: auto;
+}
+
+#tools-section {
+  flex: 0 0 auto;
+  max-height: 35vh;
+}
+
+#detail-section {
+  flex: 0 0 auto;
+  max-height: 35vh;
+}
+
+#timeline-section {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#tools-toolbar,
+#timeline-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+#timeline-toolbar h2 {
+  margin: 0;
+  font-size: 13px;
+  flex: 1;
+}
+
+button {
+  font: inherit;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.1);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--fg-muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.tool-row {
+  cursor: pointer;
+}
+
+.tool-row:hover {
+  background: var(--bg-alt);
+}
+
+.tool-row-selected {
+  background: var(--bg-alt);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.badge-critical {
+  background: #b91c1c;
+  color: #ffffff;
+}
+
+.badge-high {
+  background: #c2410c;
+  color: #ffffff;
+}
+
+.badge-medium {
+  background: #a16207;
+  color: #ffffff;
+}
+
+.badge-low {
+  background: #1d4ed8;
+  color: #ffffff;
+}
+
+.badge-info {
+  background: #374151;
+  color: #ffffff;
+}
+
+.badge-none {
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+}
+
+body.theme-dark .badge-critical {
+  background: #f87171;
+  color: #111111;
+}
+
+body.theme-dark .badge-high {
+  background: #fb923c;
+  color: #111111;
+}
+
+body.theme-dark .badge-medium {
+  background: #fbbf24;
+  color: #111111;
+}
+
+body.theme-dark .badge-low {
+  background: #60a5fa;
+  color: #111111;
+}
+
+body.theme-dark .badge-info {
+  background: #9ca3af;
+  color: #111111;
+}
+
+pre {
+  background: var(--bg-alt);
+  padding: 8px;
+  border-radius: 4px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+#detail-findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.finding {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.finding-severity {
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.finding-critical .finding-severity {
+  color: var(--err);
+}
+
+.finding-high .finding-severity {
+  color: #c2410c;
+}
+
+body.theme-dark .finding-high .finding-severity {
+  color: #fb923c;
+}
+
+.finding-medium .finding-severity {
+  color: #a16207;
+}
+
+body.theme-dark .finding-medium .finding-severity {
+  color: #fbbf24;
+}
+
+.finding-low .finding-severity,
+.finding-info .finding-severity {
+  color: var(--fg-muted);
+}
+
+.finding-title {
+  font-weight: 600;
+}
+
+.finding-detail {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+#execute-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 60ch;
+}
+
+#execute-form textarea {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px;
+}
+
+#execute-error {
+  color: var(--err);
+  font-weight: 600;
+  min-height: 1em;
+}
+
+#timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.timeline-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.timeline-time {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 9ch;
+}
+
+.timeline-kind {
+  font-weight: 600;
+}
+
+.timeline-status {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.timeline-call.timeline-ok .timeline-status {
+  color: var(--ok);
+}
+
+.timeline-call.timeline-error .timeline-status {
+  color: var(--err);
+}
+
+.timeline-toolchange .timeline-kind {
+  color: var(--accent);
+}
+
+.timeline-item details {
+  width: 100%;
+}
+
+.timeline-item summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+}

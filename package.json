@@ -1,0 +1,11 @@
+{
+  "name": "webmcp-devtools",
+  "version": "0.1.0",
+  "description": "A DevTools extension that inspects the WebMCP tools (document.modelContext) a web page exposes: a live tool table, a call-history timeline, and per-tool security diagnostics.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}
