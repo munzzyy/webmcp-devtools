@@ -97,8 +97,13 @@ export function lintTool(tool) {
   // Name and description are the strings the agent actually reads, so injection
   // phrasing there lands directly in its context.
   for (const [fieldName, value] of [['name', name], ['description', description]]) {
+    // Also match a separator-folded copy: attackers break naive keyword regexes
+    // with markdown, punctuation, or underscores ("ignore** previous",
+    // "ignore-previous", "_ignore previous") while the phrase stays readable to
+    // the agent. Folding [\W_] runs to a single space defeats that.
+    const folded = String(value).replace(/[\W_]+/g, ' ');
     for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
-      if (rx.test(value)) {
+      if (rx.test(value) || rx.test(folded)) {
         findings.push(finding('inject', severity, `${title} (${fieldName})`, detail));
       }
     }
@@ -181,7 +186,12 @@ function schemaProperties(schema) {
 
 function isFreeformString(spec) {
   if (!spec || typeof spec !== 'object') return false;
-  const isString = spec.type === 'string' || (Array.isArray(spec.type) && spec.type.includes('string'));
+  // A schema with no `type` accepts any JSON value, strings included, so an
+  // untyped risky param is just as free-form as an explicit string one. Only
+  // bail when a composite (allOf/anyOf/oneOf) is carrying the real shape.
+  const untyped = spec.type === undefined && !spec.allOf && !spec.anyOf && !spec.oneOf;
+  const isString = spec.type === 'string' ||
+    (Array.isArray(spec.type) && spec.type.includes('string')) || untyped;
   if (!isString) return false;
   const constrained = spec.enum || spec.const || spec.format || spec.pattern ||
     typeof spec.maxLength === 'number' || Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
