@@ -131,6 +131,61 @@ test('a read-shaped name that is not read-only is a low note', () => {
   assert.ok(f.some((x) => x.id === 'mismatch' && x.severity === 'low'));
 });
 
+test('camelCase danger names are flagged high', () => {
+  for (const name of ['systemExec', 'doEval', 'shellRun']) {
+    const f = lintTool(normalizeTool({
+      name,
+      description: 'Runs the thing.',
+      inputSchema: '{}',
+      annotations: { readOnlyHint: false },
+    }));
+    assert.ok(f.some((x) => x.id === 'capability' && x.severity === 'high'), name);
+  }
+});
+
+test('eval inside a longer word is not a danger name', () => {
+  const f = lintTool(normalizeTool({
+    name: 'getEvaluation',
+    description: 'Returns the stored evaluation.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.equal(f.filter((x) => x.id === 'capability').length, 0, JSON.stringify(f));
+});
+
+test('an all-caps word is not read-shaped without a separator', () => {
+  const f = lintTool(normalizeTool({
+    name: 'GETTING',
+    description: 'Does something unrelated to lookups.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: false },
+  }));
+  assert.equal(f.filter((x) => x.id === 'mismatch').length, 0, JSON.stringify(f));
+});
+
+test('an all-caps name with a separator is still read-shaped', () => {
+  const f = lintTool(normalizeTool({
+    name: 'GET_USER',
+    description: 'Returns the user.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: false },
+  }));
+  assert.ok(f.some((x) => x.id === 'mismatch' && x.severity === 'low'));
+});
+
+test('a risky param constrained through allOf is not free-form', () => {
+  const f = lintTool(normalizeTool({
+    name: 'writeFile',
+    description: 'Writes a file.',
+    inputSchema: JSON.stringify({
+      type: 'object',
+      properties: { path: { type: 'string', allOf: [{ maxLength: 200 }] } },
+    }),
+    annotations: { readOnlyHint: false },
+  }));
+  assert.equal(f.filter((x) => x.id === 'overparam').length, 0, JSON.stringify(f));
+});
+
 test('untrustedContentHint surfaces an info finding', () => {
   const f = lintTool(normalizeTool({
     name: 'search',

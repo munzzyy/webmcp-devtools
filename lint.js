@@ -136,8 +136,12 @@ export function lintTool(tool) {
   }
 
   const dangerText = /\b(?:arbitrary|any)\s+(?:shell\s+|system\s+)?(?:command|commands|code|script|sql|query)\b/i;
-  const dangerName = /runshell|runcommand|run_command|execute(?:command|code|shell)|(?:^|_|-)(?:exec|eval|shell|system)(?:$|_|-)/i;
-  if (dangerText.test(description) || dangerName.test(name)) {
+  const dangerName = /runshell|runcommand|run_command|execute(?:command|code|shell)/i;
+  // Split camelCase and snake/kebab case into words so systemExec and doEval
+  // count the same as system_exec, without matching eval inside "evaluation".
+  const dangerWord = /^(?:exec|eval|shell|system)$/i;
+  const nameWords = name.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/);
+  if (dangerText.test(description) || dangerName.test(name) || nameWords.some((w) => dangerWord.test(w))) {
     findings.push(finding('capability', 'high', 'Exposes arbitrary code or command execution',
       'This tool appears to run arbitrary commands, code, or queries. Exposed to an agent, any successful injection becomes remote code execution. Constrain it to specific, named operations.'));
   }
@@ -165,15 +169,18 @@ export function lintTool(tool) {
 
 // A name is "read-shaped" if it starts with a lookup verb followed by a word
 // boundary that also covers camelCase (getBalance) and separators (get_balance),
-// but not a longer lowercase word (getting, reader).
+// but not a longer word in the same case (getting, reader, GETTING).
 const READ_VERBS = ['get', 'list', 'read', 'search', 'find', 'fetch', 'show', 'view', 'query'];
 
 function isReadShaped(name) {
   const lower = name.toLowerCase();
+  // In an all-caps name the case flip is not a boundary: GETTING is one word,
+  // GET_USER still splits on the underscore.
+  const boundary = /[a-z]/.test(name) ? /^[^a-z]/ : /^[^a-zA-Z]/;
   for (const v of READ_VERBS) {
     if (lower.startsWith(v)) {
       const rest = name.slice(v.length);
-      if (rest === '' || /^[^a-z]/.test(rest)) return true;
+      if (rest === '' || boundary.test(rest)) return true;
     }
   }
   return false;
@@ -194,6 +201,7 @@ function isFreeformString(spec) {
     (Array.isArray(spec.type) && spec.type.includes('string')) || untyped;
   if (!isString) return false;
   const constrained = spec.enum || spec.const || spec.format || spec.pattern ||
-    typeof spec.maxLength === 'number' || Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
+    typeof spec.maxLength === 'number' || Array.isArray(spec.allOf) ||
+    Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
   return !constrained;
 }
