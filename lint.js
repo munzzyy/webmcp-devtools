@@ -97,13 +97,18 @@ export function lintTool(tool) {
   // Name and description are the strings the agent actually reads, so injection
   // phrasing there lands directly in its context.
   for (const [fieldName, value] of [['name', name], ['description', description]]) {
-    // Also match a separator-folded copy: attackers break naive keyword regexes
-    // with markdown, punctuation, or underscores ("ignore** previous",
-    // "ignore-previous", "_ignore previous") while the phrase stays readable to
-    // the agent. Folding [\W_] runs to a single space defeats that.
-    const folded = String(value).replace(/[\W_]+/g, ' ');
+    // NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
+    // fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII,
+    // so a phrase spelled in look-alike Unicode reads the same as the plain
+    // one. Then match a separator-folded copy too: attackers break naive
+    // keyword regexes with markdown, punctuation, or underscores ("ignore**
+    // previous", "ignore-previous", "_ignore previous") while the phrase
+    // stays readable to the agent. Folding [\W_] runs to a single space
+    // defeats that. Findings still report the tool's original field value.
+    const normalized = String(value).normalize('NFKC');
+    const folded = normalized.replace(/[\W_]+/g, ' ');
     for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
-      if (rx.test(value) || rx.test(folded)) {
+      if (rx.test(normalized) || rx.test(folded)) {
         findings.push(finding('inject', severity, `${title} (${fieldName})`, detail));
       }
     }
