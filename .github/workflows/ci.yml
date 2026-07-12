@@ -17,3 +17,16 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - run: node --test
+
+  # Everything here has to read like a person wrote it - comments and docs included.
+  # noslop's code mode scores each source file for machine-writing tells and fails
+  # at 10/100 lines. Pinned so a rules update in noslop can't redden CI on its own.
+  noslop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install noslop-lint==0.10.0
+      - run: git ls-files '*.js' '*.html' '*.yml' '*.md' | xargs noslop --no-config

@@ -94,7 +94,8 @@ export function lintTool(tool) {
   const schema = t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : {};
   const findings = [];
 
-  // 1. Prompt injection in name or description.
+  // Name and description are the strings the agent actually reads, so injection
+  // phrasing there lands directly in its context.
   for (const [fieldName, value] of [['name', name], ['description', description]]) {
     for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
       if (rx.test(value)) {
@@ -103,24 +104,24 @@ export function lintTool(tool) {
     }
   }
 
-  // 2. Hidden Unicode in name or description.
+  // Zero-width and bidi characters survive copy-paste but never render, which is
+  // what makes them the classic carrier for hidden instructions.
   findings.push(...scanUnicode('name', name));
   findings.push(...scanUnicode('description', description));
 
-  // 3. Known exfiltration endpoint referenced.
   const sinkHit = SINK.exec(description) || SINK.exec(JSON.stringify(schema));
   if (sinkHit) {
     findings.push(finding('sink', 'high', 'References a data-collection endpoint',
       `Mentions "${sinkHit[0]}", a paste/webhook/tunnel endpoint whose purpose is receiving data out-of-band.`));
   }
 
-  // 4. Hardcoded secret in metadata.
   if (SECRET.test(description) || SECRET.test(JSON.stringify(schema))) {
     findings.push(finding('secret', 'high', 'Possible hardcoded credential in tool metadata',
       'A credential-shaped string appears in the tool description or schema. Anything shipped in page source is exposed.'));
   }
 
-  // 5. Over-parameterization: free-form params that let the agent pass arbitrary payloads.
+  // Params only get flagged when a risky NAME meets a free-form spec - "url" as an
+  // enum of three values is fine, "url" as an unbounded string is a payload channel.
   for (const [propName, spec] of Object.entries(schemaProperties(schema))) {
     if (!RISKY_PARAM.test(propName)) continue;
     if (isFreeformString(spec)) {
@@ -129,7 +130,6 @@ export function lintTool(tool) {
     }
   }
 
-  // 6. Inherently dangerous capability handed to an agent.
   const dangerText = /\b(?:arbitrary|any)\s+(?:shell\s+|system\s+)?(?:command|commands|code|script|sql|query)\b/i;
   const dangerName = /runshell|runcommand|run_command|execute(?:command|code|shell)|(?:^|_|-)(?:exec|eval|shell|system)(?:$|_|-)/i;
   if (dangerText.test(description) || dangerName.test(name)) {
@@ -137,19 +137,16 @@ export function lintTool(tool) {
       'This tool appears to run arbitrary commands, code, or queries. Exposed to an agent, any successful injection becomes remote code execution. Constrain it to specific, named operations.'));
   }
 
-  // 7. Behavior/annotation mismatch: a read-shaped name that is not marked read-only.
   if (isReadShaped(name) && annotations.readOnlyHint !== true) {
     findings.push(finding('mismatch', 'low', 'Read-shaped name is not marked read-only',
       `"${name}" reads like a lookup but readOnlyHint is not set. If it does mutate state the name is misleading; if it does not, set readOnlyHint so agents can treat it safely.`));
   }
 
-  // 8. Untrusted-content hint present: results may carry injection.
   if (annotations.untrustedContentHint === true) {
     findings.push(finding('untrusted', 'info', 'Tool returns untrusted content',
       'This tool is flagged as returning untrusted content. Whatever it returns can contain injection aimed at the agent, so treat its output as data, not instructions.'));
   }
 
-  // 9. Malformed or missing schema / description hygiene.
   if (t.inputSchemaError) {
     findings.push(finding('schema', 'low', 'Input schema is malformed', String(t.inputSchemaError)));
   }
