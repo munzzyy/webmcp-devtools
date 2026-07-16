@@ -94,3 +94,7 @@ What the suite does not cover: the rendered DevTools panel, the background relay
 ## License
 
 MIT — free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
+
+## Support
+
+If the panel showed you something a page was hiding from you, [sponsoring](https://github.com/sponsors/munzzyy) is what keeps it tracking the spec.
