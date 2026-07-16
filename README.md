@@ -39,6 +39,31 @@ Every string a page provides is treated as hostile. Findings render as text only
 
 WebMCP itself needs Chrome 150+ with `chrome://flags/#enable-webmcp-testing` turned on, or a page that loads a polyfill. Either way, open [`examples/demo.html`](examples/demo.html) in Chrome (no flag needed) to try the panel against a self-contained page. It defines `document.modelContext` with an inline shim and registers four sample tools: two benign (`getWeather`, `addTodo`), one with a prompt-injection description (`summarizePage`), and one that runs arbitrary shell commands (`runShellCommand`). Two buttons fire `toolchange` live so you can watch the timeline and diagnostics update.
 
+Want to see what the linter catches before installing anything? `lint.js` has no `chrome.*` dependency, so it runs in plain Node against those same four tools:
+
+```
+$ node tools/demo-lint.js
+
+  webmcp-devtools demo-lint  (examples/demo.html sample tools)
+  4 tool(s) scanned
+
+  getWeather
+    no findings
+
+  addTodo
+    no findings
+
+  summarizePage
+       HIGH    Instruction-override text in a tool field (description)  [inject]
+           Tells the agent to ignore previous instructions. A tool description is read as trusted context, so this is a prompt-injection payload (tool poisoning).
+
+  runShellCommand
+       HIGH    Exposes arbitrary code or command execution  [capability]
+           This tool appears to run arbitrary commands, code, or queries. Exposed to an agent, any successful injection becomes remote code execution. Constrain it to specific, named operations.
+
+  2 tool(s) clean, 2 tool(s) flagged, 2 finding(s) total
+```
+
 ## File structure
 
 ```
@@ -55,7 +80,9 @@ core/
   worstSeverity.js    Pure: severity ranking (worstSeverity, bySeverityDesc)
   timelineReducer.js  Pure: append/cap/clear logic for the call-history timeline
 tests/                node --test over core/, lint.js, and a manifest sanity check
-examples/demo.html    Self-contained demo page with an inline WebMCP shim + 4 sample tools
+examples/demo.html     Self-contained demo page with an inline WebMCP shim + 4 sample tools
+examples/demo-tools.js Metadata for those 4 sample tools, shared with tools/demo-lint.js
+tools/demo-lint.js     Headless: lints the 4 sample tools with plain node, no Chrome needed
 icons/                Extension + panel icons
 .github/workflows/ci.yml   node --test on Node 20 and 22
 ```
