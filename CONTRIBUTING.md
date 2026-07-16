@@ -34,4 +34,4 @@ Everything a page provides (tool names, descriptions, schemas, annotations) is u
 
 ## License
 
-Contributions come in under the [Blue Oak Model License 1.0.0](https://blueoakcouncil.org/license/1.0.0). By opening a PR you agree your contribution is offered on those terms.
+By opening a PR you agree your contribution is offered under the project's MIT license.
