@@ -17,6 +17,7 @@ const EMPTY_SCHEMA = Object.freeze({ type: 'object', properties: {} });
 /**
  * @param {unknown} raw - one entry from getTools(), or a content.js projection of one
  * @returns {{
+ *   toolId: string | null,
  *   name: string,
  *   description: string,
  *   inputSchema: object,
@@ -28,6 +29,11 @@ const EMPTY_SCHEMA = Object.freeze({ type: 'object', properties: {} });
 export function normalizeTool(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
 
+  // Stable per-frame identity assigned by content.js (the tool's position in
+  // getTools()). Two tools with the same name -- or several "(unnamed tool)"
+  // entries -- stay distinct because the panel addresses them by toolId, not
+  // by name. Null when a caller (e.g. a unit test) provides no id.
+  const toolId = typeof src.toolId === 'string' ? src.toolId : null;
   const name = typeof src.name === 'string' && src.name.length > 0 ? src.name : '(unnamed tool)';
   const description = typeof src.description === 'string' ? src.description : '';
   const origin = typeof src.origin === 'string' ? src.origin : '';
@@ -35,12 +41,22 @@ export function normalizeTool(raw) {
   const { inputSchema, inputSchemaError } = parseInputSchema(src.inputSchema);
   const annotations = normalizeAnnotations(src.annotations);
 
-  return { name, description, inputSchema, inputSchemaError, annotations, origin };
+  return { toolId, name, description, inputSchema, inputSchemaError, annotations, origin };
 }
 
 function parseInputSchema(rawSchema) {
-  if (rawSchema && typeof rawSchema === 'object') {
+  // A JSON Schema is an object; an array is not a valid schema even though
+  // typeof [] === 'object'. Reject it so it surfaces as a schema error (and a
+  // lint finding) instead of being presented as a valid schema that constrains
+  // nothing.
+  if (rawSchema && typeof rawSchema === 'object' && !Array.isArray(rawSchema)) {
     return { inputSchema: rawSchema, inputSchemaError: null };
+  }
+  if (Array.isArray(rawSchema)) {
+    return {
+      inputSchema: { ...EMPTY_SCHEMA },
+      inputSchemaError: 'inputSchema is a JSON array, not a schema object',
+    };
   }
   if (typeof rawSchema === 'string') {
     if (rawSchema.trim() === '') {
@@ -48,7 +64,7 @@ function parseInputSchema(rawSchema) {
     }
     try {
       const parsed = JSON.parse(rawSchema);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         return { inputSchema: parsed, inputSchemaError: null };
       }
       return {

@@ -25,9 +25,15 @@ const INJECTION_PATTERNS = [
   [/\boverride\s+(?:your|the|all|any|previous|system)\s+(?:instructions?|guidelines?|rules?|safety|system\s+prompt|restrictions?)/i,
     'high', 'Instruction-override text in a tool field',
     'Tries to override the agent\'s guidelines, safety, or system prompt.'],
-  [/\bdo\s+not\s+(?:tell|inform|mention|alert|notify|warn|show)\s+(?:the\s+)?user/i,
+  [/\b(?:do\s+not|must\s+not|never)\s+(?:tell|inform|mention|alert|notify|warn|show)\s+(?:the\s+)?user/i,
     'high', 'Hide-from-user directive in a tool field',
     'Instructs the agent to conceal an action from the user.'],
+  [/\bforget\s+(?:everything|all\b|your|the\s+(?:above|previous|prior))/i,
+    'high', 'Instruction-override text in a tool field',
+    'Tells the agent to forget its prior instructions or context, a reset-and-hijack payload.'],
+  [/\b(?:system|assistant|developer)\s*:\s*(?:you\s+(?:are|have|now|can|must|will)|ignore|disregard|grant|now\s+you)/i,
+    'high', 'Fake role header in a tool field',
+    'Impersonates a system/assistant role prompt to inject instructions the agent may treat as higher-priority.'],
   [/\b(?:reveal|print|repeat|output|disclose|leak|exfiltrate|send)\s+(?:your|the|its)\s+(?:system\s+prompt|initial\s+instructions|instructions|api\s?key|credentials|secrets?)/i,
     'critical', 'Secret/prompt-disclosure directive in a tool field',
     'Tries to get the agent to reveal its system prompt, credentials, or secrets.'],
@@ -40,7 +46,12 @@ const INJECTION_PATTERNS = [
 ];
 
 // Endpoints whose purpose is receiving out-of-band data.
-const SINK = /(?:webhook\.site|requestbin\.\w+|pipedream\.net|hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|[0-9a-z-]+\.ngrok(?:-free)?\.(?:io|app|dev)|pastebin\.com|transfer\.sh|0x0\.st|\.oast\.(?:fun|live|pro|online|site)|burpcollaborator\.net|interact\.sh|dnslog\.cn)/i;
+// The ngrok label is bounded to a real DNS-label length (1-63 chars) and its
+// left edge is anchored with a lookbehind. An unbounded `[0-9a-z-]+` in front
+// of a literal suffix backtracks quadratically, so a page could feed a
+// multi-KB run of that class and freeze the linter for seconds -- the exact
+// anti-analysis trick this tool exists to catch.
+const SINK = /(?:webhook\.site|requestbin\.\w+|pipedream\.net|hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|(?<![0-9a-z-])[0-9a-z-]{1,63}\.ngrok(?:-free)?\.(?:io|app|dev)|pastebin\.com|transfer\.sh|0x0\.st|\.oast\.(?:fun|live|pro|online|site)|burpcollaborator\.net|interact\.sh|dnslog\.cn)/i;
 
 // Credential formats that should never appear in a tool description or schema.
 const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/;
@@ -51,18 +62,26 @@ const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|
 // Invisible / deceptive Unicode.
 function scanUnicode(field, text) {
   const out = [];
+  let index = 0;
   for (const ch of text) {
     const cp = ch.codePointAt(0);
+    // A U+FEFF at the very start is a byte-order mark -- a benign (if
+    // pointless) string lead-in, not a hidden separator. Only flag it mid-text.
+    if (cp === 0xfeff && index === 0) {
+      index += 1;
+      continue;
+    }
     if (cp >= 0xe0000 && cp <= 0xe007f) {
       out.push(finding('uni-tag', 'critical', `Invisible Unicode tag character in ${field}`,
         `U+${hex(cp)} is an invisible tag character, the standard way to smuggle hidden instructions into text the agent reads but a human does not.`));
     } else if ((cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) {
       out.push(finding('uni-bidi', 'critical', `Bidirectional control character in ${field}`,
         `U+${hex(cp)} can make the rendered text differ from what is parsed (Trojan Source).`));
-    } else if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || cp === 0xfeff || cp === 0x00ad) {
+    } else if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || (cp >= 0x2061 && cp <= 0x2064) || cp === 0xfeff || cp === 0x00ad) {
       out.push(finding('uni-zw', 'high', `Zero-width / invisible character in ${field}`,
         `U+${hex(cp)} is invisible and is often used to hide or break up text so a reviewer misses it.`));
     }
+    index += 1;
   }
   return dedupeByTitle(out);
 }
@@ -94,19 +113,32 @@ export function lintTool(tool) {
   const schema = t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : {};
   const findings = [];
 
+  // Cap what the pattern scans read. The whole point of this linter is to look
+  // at hostile, page-controlled metadata, so a page can hand us a megabyte of
+  // text purely to make the regex work expensive. 16 KB is far more than any
+  // real tool field needs; anything past it is scanned truncated and the
+  // truncation is reported as its own finding.
+  const MAX_SCAN = 16384;
+  const schemaJson = JSON.stringify(schema);
+  const descScan = description.length > MAX_SCAN ? description.slice(0, MAX_SCAN) : description;
+  const schemaScan = schemaJson.length > MAX_SCAN ? schemaJson.slice(0, MAX_SCAN) : schemaJson;
+
   // Name and description are the strings the agent actually reads, so injection
   // phrasing there lands directly in its context.
-  for (const [fieldName, value] of [['name', name], ['description', description]]) {
+  for (const [fieldName, value] of [['name', name], ['description', descScan]]) {
     // NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
     // fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII,
     // so a phrase spelled in look-alike Unicode reads the same as the plain
     // one. Then match a separator-folded copy too: attackers break naive
-    // keyword regexes with markdown, punctuation, or underscores ("ignore**
+    // keyword regexes with markdown, underscores, or dashes ("ignore**
     // previous", "ignore-previous", "_ignore previous") while the phrase
-    // stays readable to the agent. Folding [\W_] runs to a single space
-    // defeats that. Findings still report the tool's original field value.
+    // stays readable to the agent. Fold only those glue characters and
+    // whitespace -- keep sentence punctuation (.,;:) as a hard boundary so a
+    // comma- or period-separated word list ("Flags: ignore, previous,
+    // instructions") is not misread as a running phrase. Findings still
+    // report the tool's original field value.
     const normalized = String(value).normalize('NFKC');
-    const folded = normalized.replace(/[\W_]+/g, ' ');
+    const folded = normalized.replace(/[\s_*~`-]+/g, ' ');
     for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
       if (rx.test(normalized) || rx.test(folded)) {
         findings.push(finding('inject', severity, `${title} (${fieldName})`, detail));
@@ -119,13 +151,13 @@ export function lintTool(tool) {
   findings.push(...scanUnicode('name', name));
   findings.push(...scanUnicode('description', description));
 
-  const sinkHit = SINK.exec(description) || SINK.exec(JSON.stringify(schema));
+  const sinkHit = SINK.exec(descScan) || SINK.exec(schemaScan);
   if (sinkHit) {
     findings.push(finding('sink', 'high', 'References a data-collection endpoint',
       `Mentions "${sinkHit[0]}", a paste/webhook/tunnel endpoint whose purpose is receiving data out-of-band.`));
   }
 
-  if (SECRET.test(description) || SECRET.test(JSON.stringify(schema))) {
+  if (SECRET.test(descScan) || SECRET.test(schemaScan)) {
     findings.push(finding('secret', 'high', 'Possible hardcoded credential in tool metadata',
       'A credential-shaped string appears in the tool description or schema. Anything shipped in page source is exposed.'));
   }
@@ -140,15 +172,32 @@ export function lintTool(tool) {
     }
   }
 
-  const dangerText = /\b(?:arbitrary|any)\s+(?:shell\s+|system\s+)?(?:command|commands|code|script|sql|query)\b/i;
-  const dangerName = /runshell|runcommand|run_command|execute(?:command|code|shell)/i;
+  const dangerText = /\b(?:arbitrary|any)\s+(?:shell\s+|system\s+)?(?:command|commands|code|script|scripts|sql|query|queries)\b/i;
+  const dangerName = /runshell|runcommand|run_command|execute(?:command|code|shell)|shell_?exec|exec_?shell/i;
   // Split camelCase and snake/kebab case into words so systemExec and doEval
   // count the same as system_exec, without matching eval inside "evaluation".
   const dangerWord = /^(?:exec|eval|shell|system)$/i;
-  const nameWords = name.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/);
-  if (dangerText.test(description) || dangerName.test(name) || nameWords.some((w) => dangerWord.test(w))) {
+  // A lone "system" or "shell" word (getSystemInfo, shellSort) is only a naming
+  // smell. It rises to the high capability finding when it sits right next to a
+  // word that implies actually running something: systemExec, shellRun, doEval.
+  const actionWord = /^(?:exec|eval|shell|system|run|execute|invoke|call|do|spawn|launch|command|cmd|code|script|query|sql|raw|arbitrary)$/i;
+  const nameWords = name.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+  let dangerPair = false;
+  let loneDanger = false;
+  for (let i = 0; i < nameWords.length; i += 1) {
+    if (!dangerWord.test(nameWords[i])) continue;
+    const neighbourIsAction =
+      (i > 0 && actionWord.test(nameWords[i - 1])) ||
+      (i + 1 < nameWords.length && actionWord.test(nameWords[i + 1]));
+    if (neighbourIsAction) dangerPair = true;
+    else loneDanger = true;
+  }
+  if (dangerText.test(descScan) || dangerName.test(name) || dangerPair) {
     findings.push(finding('capability', 'high', 'Exposes arbitrary code or command execution',
       'This tool appears to run arbitrary commands, code, or queries. Exposed to an agent, any successful injection becomes remote code execution. Constrain it to specific, named operations.'));
+  } else if (loneDanger) {
+    findings.push(finding('capability', 'low', 'Name hints at command or code execution',
+      `"${name}" contains an execution-related word (exec, eval, shell, or system). On its own that is only a naming smell, but if this tool does run commands or code, constrain it to specific, named operations and describe it accurately.`));
   }
 
   if (isReadShaped(name) && annotations.readOnlyHint !== true) {
@@ -167,6 +216,10 @@ export function lintTool(tool) {
   if (!description.trim()) {
     findings.push(finding('nodesc', 'low', 'Tool has no description',
       'A tool with no description gives the agent nothing to reason about and cannot be reviewed.'));
+  }
+  if (description.length > MAX_SCAN || schemaJson.length > MAX_SCAN) {
+    findings.push(finding('truncated', 'low', 'Oversized tool metadata (scanned first 16 KB)',
+      'The description or schema is larger than 16 KB, so only the first 16 KB was scanned for injection and exfiltration patterns. An oversized tool field is itself unusual for a legitimate tool.'));
   }
 
   return findings;

@@ -24,10 +24,10 @@ import { lintTool } from './lint.js';
 const tabId = chrome.devtools.inspectedWindow.tabId;
 const port = chrome.runtime.connect({ name: 'webmcp-panel' });
 
-/** @type {Map<number, { origin: string, hasModelContext: boolean, tools: ReturnType<typeof normalizeTool>[] }>} */
+/** @type {Map<number, { origin: string, hasModelContext: boolean, error?: string, tools: ReturnType<typeof normalizeTool>[] }>} */
 const toolsByFrame = new Map();
 let timelineState = createTimelineState();
-let selectedToolKey = null; // { frameId, name } | null
+let selectedToolKey = null; // { frameId, toolId } | null
 let callCounter = 0;
 
 // Match the DevTools theme (chrome.devtools.panels.themeName is 'default' or
@@ -58,6 +58,9 @@ document.getElementById('execute-form').addEventListener('submit', (event) => {
   const errorEl = document.getElementById('execute-error');
   errorEl.textContent = '';
 
+  const selected = findTool(selectedToolKey.frameId, selectedToolKey.toolId);
+  if (!selected) return;
+
   const raw = textarea.value.trim() === '' ? '{}' : textarea.value;
   try {
     JSON.parse(raw); // validate only -- the ORIGINAL text is forwarded as the JSON-string arg
@@ -71,7 +74,8 @@ document.getElementById('execute-form').addEventListener('submit', (event) => {
   port.postMessage({
     type: 'executeTool',
     frameId: selectedToolKey.frameId,
-    toolName: selectedToolKey.name,
+    toolId: selectedToolKey.toolId,
+    toolName: selected.name, // display only; content.js resolves the tool by toolId
     argsJson: raw,
     callId,
   });
@@ -91,12 +95,24 @@ function handleMessage(msg) {
     case 'status':
       upsertFrameStatus(msg);
       renderStatusBar();
+      // A 'status' with hasModelContext:false (e.g. after navigating to a page
+      // with no WebMCP) drops that frame's tools, so the table and detail pane
+      // must re-render too or they keep showing the previous page's tools.
+      renderToolsTable();
+      renderDetail();
       break;
     case 'tools':
       upsertFrameTools(msg);
       renderStatusBar();
       renderToolsTable();
       renderDetail();
+      break;
+    case 'frameGone':
+      if (toolsByFrame.delete(msg.frameId)) {
+        renderStatusBar();
+        renderToolsTable();
+        renderDetail();
+      }
       break;
     case 'toolchange':
       timelineState = timelineReducer(timelineState, {
@@ -117,10 +133,14 @@ function handleMessage(msg) {
 
 function upsertFrameStatus(msg) {
   const existing = toolsByFrame.get(msg.frameId) || { tools: [] };
+  const hasModelContext = !!msg.hasModelContext;
   toolsByFrame.set(msg.frameId, {
-    tools: existing.tools,
+    // When the frame no longer has a modelContext, its tools are gone -- keeping
+    // them would leave the previous page's tools listed and lintable under a
+    // "not found" status bar. Only carry tools forward while it still has one.
+    tools: hasModelContext ? existing.tools : [],
     origin: typeof msg.origin === 'string' ? msg.origin : existing.origin || '',
-    hasModelContext: !!msg.hasModelContext,
+    hasModelContext,
   });
 }
 
@@ -129,6 +149,9 @@ function upsertFrameTools(msg) {
   toolsByFrame.set(msg.frameId, {
     origin: typeof msg.origin === 'string' ? msg.origin : '',
     hasModelContext: msg.hasModelContext !== false,
+    // content.js sets `error` when getTools() rejected or returned a non-array.
+    // Keep it so the status bar can say so instead of showing "present (0 tools)".
+    error: typeof msg.error === 'string' ? msg.error : undefined,
     tools: rawTools.map(normalizeTool),
   });
 }
@@ -147,7 +170,7 @@ function handleExecuteResult(msg) {
   });
   renderTimeline();
 
-  if (selectedToolKey && selectedToolKey.frameId === msg.frameId && selectedToolKey.name === msg.toolName) {
+  if (selectedToolKey && selectedToolKey.frameId === msg.frameId && selectedToolKey.toolId === msg.toolId) {
     const resultEl = document.getElementById('execute-result');
     resultEl.textContent = msg.ok ? safeStringify(msg.result) : `Error: ${msg.error}`;
   }
@@ -222,6 +245,16 @@ function renderStatusBar() {
       text: `document.modelContext: present (${totalTools} ${toolWord} across ${frames.length} ${frameWord})`,
     }),
   );
+
+  // A frame that reported an error reading its tools would otherwise be
+  // indistinguishable from a frame that genuinely has zero -- surface it so
+  // "present (0 tools)" is never mistaken for "tools read successfully".
+  const errored = frames.filter((f) => typeof f.error === 'string' && f.error);
+  for (const f of errored) {
+    statusEl.appendChild(
+      h('span', { class: 'status-badge status-error', text: `Error reading tools: ${f.error}` }),
+    );
+  }
 }
 
 function flattenTools() {
@@ -235,10 +268,22 @@ function flattenTools() {
   return rows;
 }
 
+// Memoize per tool object. renderToolsTable lints every row and renderDetail
+// lints the selected one again, and both re-run on every 'tools'/'toolchange'
+// message -- all of which a page can fire in a loop. A new 'tools' message
+// rebuilds the normalized tool objects, so this WeakMap naturally recomputes
+// then and only then; within one render pass each tool is linted once.
+const lintCache = new WeakMap();
+
 function safeLint(tool) {
+  if (tool && typeof tool === 'object' && lintCache.has(tool)) {
+    return lintCache.get(tool);
+  }
   try {
     const findings = lintTool(tool);
-    return Array.isArray(findings) ? findings : [];
+    const out = Array.isArray(findings) ? findings : [];
+    if (tool && typeof tool === 'object') lintCache.set(tool, out);
+    return out;
   } catch (err) {
     // lint.js is a swappable module; a bug in it should never crash the panel.
     return [
@@ -262,7 +307,7 @@ function renderToolsTable() {
   for (const { frameId, tool } of rows) {
     const findings = safeLint(tool);
     const worst = worstSeverity(findings);
-    const isSelected = !!selectedToolKey && selectedToolKey.frameId === frameId && selectedToolKey.name === tool.name;
+    const isSelected = !!selectedToolKey && selectedToolKey.frameId === frameId && selectedToolKey.toolId === tool.toolId;
 
     const tr = h(
       'tr',
@@ -275,11 +320,11 @@ function renderToolsTable() {
         h('td', {}, [severityBadge(worst)]),
       ],
     );
-    tr.addEventListener('click', () => selectTool(frameId, tool.name));
+    tr.addEventListener('click', () => selectTool(frameId, tool.toolId));
     tr.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        selectTool(frameId, tool.name);
+        selectTool(frameId, tool.toolId);
       }
     });
     tbody.appendChild(tr);
@@ -293,14 +338,14 @@ function severityBadge(severity) {
   });
 }
 
-function findTool(frameId, name) {
+function findTool(frameId, toolId) {
   const frame = toolsByFrame.get(frameId);
   if (!frame) return null;
-  return frame.tools.find((t) => t.name === name) || null;
+  return frame.tools.find((t) => t.toolId === toolId) || null;
 }
 
-function selectTool(frameId, name) {
-  selectedToolKey = { frameId, name };
+function selectTool(frameId, toolId) {
+  selectedToolKey = { frameId, toolId };
   renderToolsTable();
   renderDetail();
 }
@@ -312,7 +357,7 @@ function renderDetail() {
     return;
   }
 
-  const tool = findTool(selectedToolKey.frameId, selectedToolKey.name);
+  const tool = findTool(selectedToolKey.frameId, selectedToolKey.toolId);
   if (!tool) {
     section.hidden = true;
     selectedToolKey = null;

@@ -47,6 +47,10 @@ function handleContentConnect(port) {
     if (!frames) return;
     frames.delete(frameId);
     if (frames.size === 0) contentPortsByTab.delete(tabId);
+    // Tell the panel the frame is gone. A page navigated to a site with no
+    // content script (or a closed frame) sends no further messages, so without
+    // this the panel would keep that frame's stale tools listed indefinitely.
+    forwardToPanels(tabId, { type: 'frameGone', frameId });
   });
 }
 

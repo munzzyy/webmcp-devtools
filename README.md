@@ -98,11 +98,12 @@ Tool objects from `getTools()` carry a live `window` reference and can't be clon
 ## Permissions
 
 ```json
-"permissions": [],
-"host_permissions": ["<all_urls>"]
+"permissions": []
 ```
 
-WebMCP tools can be registered by any origin you open DevTools against, so the content script can't be scoped to a fixed host list ahead of time. That's the one broad permission it asks for. `permissions` is deliberately empty: `devtools_page` grants `chrome.devtools.*`, the content script is declared statically (no `chrome.scripting`), and panel-to-content routing uses ports instead of `chrome.tabs.sendMessage`, so `tabs` and `activeTab` aren't needed either.
+Both `permissions` and `host_permissions` are empty. WebMCP tools can be registered by any origin you open DevTools against, so the content script matches `<all_urls>` — but that scope comes from `content_scripts.matches`, which is what actually decides where a statically declared MV3 content script injects. `host_permissions` is a separate grant (cross-origin `fetch` from the service worker, `chrome.tabs` host access, cookies) that nothing in this extension uses, so it's not requested. `permissions` is empty for the same reason: `devtools_page` grants `chrome.devtools.*`, the content script is declared statically (no `chrome.scripting`), and panel-to-content routing uses ports instead of `chrome.tabs.sendMessage`, so `tabs` and `activeTab` aren't needed either.
+
+Dropping `host_permissions` does not change the install-time warning — a content script matching `<all_urls>` already asks for "Read and change all your data on all websites." The point is to not hold privilege the code never exercises.
 
 ## Security notes
 

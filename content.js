@@ -19,9 +19,11 @@ const port = chrome.runtime.connect({ name: 'webmcp-content' });
 
 // Live tool objects can't be structured-cloned across the messaging boundary
 // (each one carries a `window` reference), so the actual objects returned by
-// getTools() are cached here, keyed by name, and only a serializable
-// projection of each is ever sent to the panel. executeTool-by-name looks
-// the real object back up from this cache.
+// getTools() are cached here, keyed by a stable positional toolId (the tool's
+// index in getTools()), and only a serializable projection of each is ever
+// sent to the panel. Keying by id, not name, keeps two same-named tools --
+// or several unnamed ones -- from collapsing onto each other, so
+// executeTool-by-id runs exactly the tool the panel row points at.
 let toolCache = new Map();
 
 let pollTimer = null;
@@ -101,12 +103,26 @@ async function announceTools() {
   }
   try {
     const rawTools = await document.modelContext.getTools();
+    if (!Array.isArray(rawTools)) {
+      // A conforming getTools() resolves to an array. Report the shape instead
+      // of silently coercing to an empty list, which reads as "0 tools" and
+      // hides a broken page.
+      postSafe({
+        type: 'tools',
+        origin: safeOrigin(),
+        hasModelContext: true,
+        tools: [],
+        error: `getTools() returned ${typeof rawTools}, not an array`,
+      });
+      return;
+    }
     toolCache = new Map();
     const projected = [];
-    for (const raw of Array.isArray(rawTools) ? rawTools : []) {
-      const name = raw && typeof raw.name === 'string' ? raw.name : undefined;
-      if (name) toolCache.set(name, raw);
-      projected.push(projectTool(raw));
+    for (let i = 0; i < rawTools.length; i += 1) {
+      const raw = rawTools[i];
+      const toolId = String(i);
+      toolCache.set(toolId, raw);
+      projected.push(projectTool(raw, toolId));
     }
     postSafe({ type: 'tools', origin: safeOrigin(), hasModelContext: true, tools: projected });
   } catch (err) {
@@ -125,9 +141,10 @@ async function announceTools() {
 // may still be the raw JSON string. Real parsing/normalization happens in
 // panel.js via core/normalizeTool.js, not here, so that logic exists in one
 // pure, unit-tested place.
-function projectTool(raw) {
+function projectTool(raw, toolId) {
   const src = raw && typeof raw === 'object' ? raw : {};
   return {
+    toolId,
     name: src.name,
     description: src.description,
     inputSchema: src.inputSchema,
@@ -137,13 +154,14 @@ function projectTool(raw) {
 }
 
 async function handleExecuteTool(msg) {
-  const { callId, toolName, argsJson } = msg;
+  const { callId, toolId, toolName, argsJson } = msg;
   const timestamp = Date.now();
 
   if (!hasModelContext()) {
     postSafe({
       type: 'executeResult',
       callId,
+      toolId,
       toolName,
       argsJson,
       ok: false,
@@ -153,11 +171,12 @@ async function handleExecuteTool(msg) {
     return;
   }
 
-  const tool = toolCache.get(toolName);
+  const tool = toolCache.get(toolId);
   if (!tool) {
     postSafe({
       type: 'executeResult',
       callId,
+      toolId,
       toolName,
       argsJson,
       ok: false,
@@ -172,6 +191,7 @@ async function handleExecuteTool(msg) {
     postSafe({
       type: 'executeResult',
       callId,
+      toolId,
       toolName,
       argsJson,
       ok: true,
@@ -182,6 +202,7 @@ async function handleExecuteTool(msg) {
     postSafe({
       type: 'executeResult',
       callId,
+      toolId,
       toolName,
       argsJson,
       ok: false,

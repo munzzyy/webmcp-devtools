@@ -91,3 +91,20 @@ test('normalizeTool treats an empty-string inputSchema as an empty object schema
   assert.deepEqual(tool.inputSchema, { type: 'object', properties: {} });
   assert.equal(tool.inputSchemaError, null);
 });
+
+test('normalizeTool rejects a JSON array as an inputSchema (raw and JSON-string)', () => {
+  const rawArray = normalizeTool({ name: 't', inputSchema: [{ command: 'string' }] });
+  assert.notEqual(rawArray.inputSchemaError, null);
+
+  const stringArray = normalizeTool({ name: 't', inputSchema: JSON.stringify([{ command: 'string' }]) });
+  assert.notEqual(stringArray.inputSchemaError, null);
+
+  // A real object schema still parses cleanly.
+  const ok = normalizeTool({ name: 't', inputSchema: JSON.stringify({ type: 'object', properties: {} }) });
+  assert.equal(ok.inputSchemaError, null);
+});
+
+test('normalizeTool carries a stable toolId through when present, null otherwise', () => {
+  assert.equal(normalizeTool({ toolId: '3', name: 't' }).toolId, '3');
+  assert.equal(normalizeTool({ name: 't' }).toolId, null);
+});

@@ -56,6 +56,11 @@ test('manifest.json does not request web_accessible_resources (none needed)', ()
   assert.equal(manifest.web_accessible_resources, undefined);
 });
 
+test('manifest.json does not request host_permissions (content_scripts.matches scopes injection; nothing uses the grant)', () => {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(manifest.host_permissions, undefined);
+});
+
 test('every file referenced by manifest.json exists on disk', () => {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
   const repoRoot = path.join(here, '..');
