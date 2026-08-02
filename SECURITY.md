@@ -38,5 +38,5 @@ Include what you found, how to reproduce it, and the impact you'd expect.
 
 ## Supported versions
 
-Fixes land on main; there are no tagged releases yet and no backport policy.
-When tags exist, the latest one is the supported version.
+Fixes land on main and the latest tag is the supported version (v0.2.0 as of
+August 2026). There is no backport policy.
