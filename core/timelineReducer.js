@@ -22,8 +22,12 @@ export function createTimelineState(cap = DEFAULT_TIMELINE_CAP) {
 
 /**
  * @param {TimelineState} state
- * @param {{ type: 'call' | 'toolchange' | 'clear', [key: string]: unknown }} event
+ * @param {{ type: 'call' | 'toolchange' | 'toolset' | 'clear', [key: string]: unknown }} event
  * @returns {TimelineState} a new state; the input state is never mutated
+ *
+ * 'toolset' entries carry the diff between two successive tool announcements
+ * from one frame (added/removed/mutated names) -- the panel computes them via
+ * core/toolDiff.js.
  */
 export function timelineReducer(state, event) {
   const entries = state && Array.isArray(state.entries) ? state.entries : [];
@@ -37,7 +41,7 @@ export function timelineReducer(state, event) {
     return { entries: [], cap };
   }
 
-  if (event.type !== 'call' && event.type !== 'toolchange') {
+  if (event.type !== 'call' && event.type !== 'toolchange' && event.type !== 'toolset') {
     return { entries, cap }; // unknown event types are ignored, never thrown
   }
 

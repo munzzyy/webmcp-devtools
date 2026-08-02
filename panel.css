@@ -85,6 +85,19 @@ header#status-bar {
   color: var(--fg-muted);
 }
 
+/* "Diagnostics did not run" states (dead bridge, dropped port, tool-read
+   errors). These must out-shout every other badge: a failure to inspect can
+   never be allowed to read like a clean page. */
+.status-error {
+  background: #7f1d1d;
+  color: #ffffff;
+}
+
+.status-warn {
+  background: #78350f;
+  color: #ffffff;
+}
+
 .empty-state {
   margin: 4px 0 0;
   color: var(--fg-muted);
@@ -373,6 +386,22 @@ body.theme-dark .finding-medium .finding-severity {
 
 .timeline-toolchange .timeline-kind {
   color: var(--accent);
+}
+
+.timeline-toolset .timeline-kind {
+  color: var(--accent);
+}
+
+/* A mutated already-registered tool is the standout event in the timeline. */
+.timeline-mutation .timeline-kind {
+  color: var(--err);
+}
+
+.timeline-diff {
+  width: 100%;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  color: var(--fg-muted);
 }
 
 .timeline-item details {

@@ -32,6 +32,21 @@ test('timelineReducer accepts both "call" and "toolchange" event types', () => {
   assert.equal(state.entries[0].type, 'toolchange');
 });
 
+test('timelineReducer accepts "toolset" diff entries', () => {
+  let state = createTimelineState(10);
+  state = timelineReducer(state, {
+    type: 'toolset',
+    origin: 'https://example.com',
+    timestamp: 1,
+    added: ['pingServer'],
+    removed: [],
+    mutated: [{ toolId: 't1', name: 'getWeather', fields: ['description'] }],
+  });
+  assert.equal(state.entries.length, 1);
+  assert.equal(state.entries[0].type, 'toolset');
+  assert.deepEqual(state.entries[0].added, ['pingServer']);
+});
+
 test('timelineReducer ignores unknown event types instead of throwing', () => {
   let state = createTimelineState(10);
   state = timelineReducer(state, { type: 'call', toolName: 'a', timestamp: 1 });

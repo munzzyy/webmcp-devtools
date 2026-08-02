@@ -107,17 +107,28 @@ export async function loadPanel() {
 
   let messageHandler = null;
   const sent = [];
-  const port = {
-    onMessage: { addListener: (fn) => { messageHandler = fn; } },
-    postMessage: (msg) => { sent.push(msg); },
-  };
+  const ports = [];
+  // panel.js reconnects after a disconnect (MV3 service-worker cycles), so
+  // every connect() mints a fresh fake port; `sent` aggregates across all of
+  // them and `emit`/`disconnectPort` always address the newest one.
+  function makePort() {
+    const disconnectHandlers = [];
+    const port = {
+      onMessage: { addListener: (fn) => { messageHandler = fn; } },
+      onDisconnect: { addListener: (fn) => { disconnectHandlers.push(fn); } },
+      postMessage: (msg) => { sent.push(msg); },
+      disconnect: () => { for (const fn of disconnectHandlers) fn(); },
+    };
+    ports.push(port);
+    return port;
+  }
 
   const chrome = {
     devtools: {
       inspectedWindow: { tabId: 1 },
       panels: { themeName: 'default' },
     },
-    runtime: { connect: () => port },
+    runtime: { connect: () => makePort() },
   };
 
   globalThis.document = document;
@@ -129,6 +140,8 @@ export async function loadPanel() {
   return {
     emit: (msg) => messageHandler && messageHandler(msg),
     sent,
+    ports,
+    disconnectPort: () => ports[ports.length - 1].disconnect(),
     el: (id) => byId.get(id),
     text: (id) => byId.get(id).textContent,
     rows: () => byId.get('tools-tbody').children,

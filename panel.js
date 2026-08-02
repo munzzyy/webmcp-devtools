@@ -19,15 +19,18 @@
 import { normalizeTool } from './core/normalizeTool.js';
 import { worstSeverity, bySeverityDesc } from './core/worstSeverity.js';
 import { createTimelineState, timelineReducer } from './core/timelineReducer.js';
+import { diffToolLists, toolFingerprint } from './core/toolDiff.js';
 import { lintTool } from './lint.js';
 
 const tabId = chrome.devtools.inspectedWindow.tabId;
-const port = chrome.runtime.connect({ name: 'webmcp-panel' });
 
-/** @type {Map<number, { origin: string, hasModelContext: boolean, error?: string, tools: ReturnType<typeof normalizeTool>[] }>} */
+/** @type {Map<number, { origin: string, hasModelContext: boolean, bridge?: boolean, surfaces?: object, capabilities?: object, observing?: object, error?: string, announcedTools?: boolean, tools: ReturnType<typeof normalizeTool>[] }>} */
 const toolsByFrame = new Map();
+// frameId:toolId -> Set of field names the page changed after registration
+const mutatedFields = new Map();
 let timelineState = createTimelineState();
-let selectedToolKey = null; // { frameId, toolId } | null
+let selectedToolKey = null; // { frameId, toolId, fingerprint } | null
+let lastDetailKey = null; // which selection the execute result panes belong to
 let callCounter = 0;
 
 // Match the DevTools theme (chrome.devtools.panels.themeName is 'default' or
@@ -36,13 +39,60 @@ let callCounter = 0;
 const theme = typeof chrome.devtools.panels.themeName === 'string' ? chrome.devtools.panels.themeName : 'default';
 document.body.classList.add(theme === 'dark' ? 'theme-dark' : 'theme-light');
 
-port.onMessage.addListener(handleMessage);
-port.postMessage({ type: 'init', tabId });
-port.postMessage({ type: 'getTools' }); // fetch current state immediately; content.js may have
-// already self-announced before this panel existed, so ask fresh rather than waiting.
+// An MV3 service-worker cycle (extension reload/update, worker crash, the
+// chrome://extensions toggle) silently closes the Port. A panel that keeps
+// rendering its last tool list after that is the worst failure mode a
+// security tool can have: a stale clean verdict looks identical to a fresh
+// one. So on disconnect the tools are dropped, the status bar says so, and
+// the panel reconnects with capped backoff.
+let port = null;
+let disconnected = false;
+let reconnectDelay = 250;
+const RECONNECT_MAX_MS = 5000;
+
+function connect() {
+  let p;
+  try {
+    p = chrome.runtime.connect({ name: 'webmcp-panel' });
+  } catch (err) {
+    disconnected = true;
+    renderStatusBar();
+    return;
+  }
+  port = p;
+  disconnected = false;
+  p.onMessage.addListener(handleMessage);
+  p.postMessage({ type: 'init', tabId });
+  p.postMessage({ type: 'getTools' }); // fetch current state immediately; the content side may
+  // have already self-announced before this panel existed, so ask fresh rather than waiting.
+  p.onDisconnect.addListener(() => {
+    if (port !== p) return;
+    port = null;
+    disconnected = true;
+    toolsByFrame.clear();
+    mutatedFields.clear();
+    renderStatusBar();
+    renderToolsTable();
+    renderDetail();
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+    setTimeout(connect, delay);
+  });
+}
+
+function send(msg) {
+  if (!port) return;
+  try {
+    port.postMessage(msg);
+  } catch (err) {
+    // port died between the check and the send; onDisconnect handles it
+  }
+}
+
+connect();
 
 document.getElementById('refresh-btn').addEventListener('click', () => {
-  port.postMessage({ type: 'getTools' });
+  send({ type: 'getTools' });
 });
 
 document.getElementById('clear-timeline-btn').addEventListener('click', () => {
@@ -61,9 +111,16 @@ document.getElementById('execute-form').addEventListener('submit', (event) => {
   const selected = findTool(selectedToolKey.frameId, selectedToolKey.toolId);
   if (!selected) return;
 
+  // Never execute a tool that no longer matches what was reviewed. The
+  // toolset diff normally clears the selection first; this is the backstop.
+  if (selectedToolKey.fingerprint && toolFingerprint(selected) !== selectedToolKey.fingerprint) {
+    errorEl.textContent = 'This tool changed since you selected it. Re-select it and review the current definition before executing.';
+    return;
+  }
+
   const raw = textarea.value.trim() === '' ? '{}' : textarea.value;
   try {
-    JSON.parse(raw); // validate only -- the ORIGINAL text is forwarded as the JSON-string arg
+    JSON.parse(raw); // validate only -- the ORIGINAL text is forwarded; the bridge parses it
   } catch (err) {
     errorEl.textContent = `Arguments must be valid JSON: ${err.message}`;
     return;
@@ -71,11 +128,11 @@ document.getElementById('execute-form').addEventListener('submit', (event) => {
 
   callCounter += 1;
   const callId = `call-${Date.now()}-${callCounter}`;
-  port.postMessage({
+  send({
     type: 'executeTool',
     frameId: selectedToolKey.frameId,
     toolId: selectedToolKey.toolId,
-    toolName: selected.name, // display only; content.js resolves the tool by toolId
+    toolName: selected.name, // display only; the bridge resolves the tool by toolId
     argsJson: raw,
     callId,
   });
@@ -108,6 +165,7 @@ function handleMessage(msg) {
       renderDetail();
       break;
     case 'frameGone':
+      clearFrameMutations(msg.frameId);
       if (toolsByFrame.delete(msg.frameId)) {
         renderStatusBar();
         renderToolsTable();
@@ -123,6 +181,22 @@ function handleMessage(msg) {
       });
       renderTimeline();
       break;
+    case 'observedCall':
+      // A call the page (or an agent driving it) made itself, seen through the
+      // bridge's executeTool/handler wrappers -- not one this panel issued.
+      timelineState = timelineReducer(timelineState, {
+        type: 'call',
+        initiator: 'page',
+        frameId: msg.frameId,
+        toolName: msg.toolName,
+        argsJson: msg.argsJson,
+        ok: msg.ok,
+        result: msg.result,
+        error: msg.error,
+        timestamp: msg.timestamp,
+      });
+      renderTimeline();
+      break;
     case 'executeResult':
       handleExecuteResult(msg);
       break;
@@ -134,26 +208,80 @@ function handleMessage(msg) {
 function upsertFrameStatus(msg) {
   const existing = toolsByFrame.get(msg.frameId) || { tools: [] };
   const hasModelContext = !!msg.hasModelContext;
+  if (!hasModelContext) clearFrameMutations(msg.frameId);
   toolsByFrame.set(msg.frameId, {
     // When the frame no longer has a modelContext, its tools are gone -- keeping
     // them would leave the previous page's tools listed and lintable under a
     // "not found" status bar. Only carry tools forward while it still has one.
     tools: hasModelContext ? existing.tools : [],
+    announcedTools: hasModelContext ? existing.announcedTools : false,
     origin: typeof msg.origin === 'string' ? msg.origin : existing.origin || '',
     hasModelContext,
+    // Bridge health and surface/capability detail from page-bridge.js.
+    // content.js stamps bridge:true on live-bridge statuses and sends an
+    // explicit bridge:false when the bridge never checked in.
+    bridge: typeof msg.bridge === 'boolean' ? msg.bridge : existing.bridge,
+    surfaces: msg.surfaces && typeof msg.surfaces === 'object' ? msg.surfaces : existing.surfaces,
+    capabilities: msg.capabilities && typeof msg.capabilities === 'object' ? msg.capabilities : existing.capabilities,
+    observing: msg.observing && typeof msg.observing === 'object' ? msg.observing : existing.observing,
   });
 }
 
 function upsertFrameTools(msg) {
+  const existing = toolsByFrame.get(msg.frameId);
   const rawTools = Array.isArray(msg.tools) ? msg.tools : [];
+  const hasModelContext = msg.hasModelContext !== false;
+  const origin = typeof msg.origin === 'string' ? msg.origin : '';
+  const nextTools = rawTools.map(normalizeTool);
+
+  // Diff against the previous announcement from this frame. A tool whose
+  // description, hints, or schema change AFTER it was first announced is the
+  // mid-session move a static lint can never see; record what changed, both
+  // in the timeline and as a per-tool finding.
+  if (existing && existing.announcedTools && hasModelContext) {
+    const diff = diffToolLists(existing.tools, nextTools);
+    if (diff.added.length || diff.removed.length || diff.mutated.length) {
+      timelineState = timelineReducer(timelineState, {
+        type: 'toolset',
+        frameId: msg.frameId,
+        origin,
+        timestamp: Date.now(),
+        added: diff.added.map((t) => t.name),
+        removed: diff.removed.map((t) => t.name),
+        mutated: diff.mutated,
+      });
+      renderTimeline();
+      for (const m of diff.mutated) {
+        const key = `${msg.frameId}:${m.toolId}`;
+        const fields = mutatedFields.get(key) || new Set();
+        for (const field of m.fields) fields.add(field);
+        mutatedFields.set(key, fields);
+      }
+      for (const r of diff.removed) mutatedFields.delete(`${msg.frameId}:${r.toolId}`);
+    }
+  }
+  if (!hasModelContext) clearFrameMutations(msg.frameId);
+
   toolsByFrame.set(msg.frameId, {
-    origin: typeof msg.origin === 'string' ? msg.origin : '',
-    hasModelContext: msg.hasModelContext !== false,
-    // content.js sets `error` when getTools() rejected or returned a non-array.
+    origin,
+    hasModelContext,
+    announcedTools: hasModelContext,
+    // The bridge sets `error` when getTools() rejected or returned a non-array.
     // Keep it so the status bar can say so instead of showing "present (0 tools)".
     error: typeof msg.error === 'string' ? msg.error : undefined,
-    tools: rawTools.map(normalizeTool),
+    tools: nextTools,
+    bridge: existing ? existing.bridge : undefined,
+    surfaces: existing ? existing.surfaces : undefined,
+    capabilities: existing ? existing.capabilities : undefined,
+    observing: existing ? existing.observing : undefined,
   });
+}
+
+function clearFrameMutations(frameId) {
+  const prefix = `${frameId}:`;
+  for (const key of [...mutatedFields.keys()]) {
+    if (key.startsWith(prefix)) mutatedFields.delete(key);
+  }
 }
 
 function handleExecuteResult(msg) {
@@ -213,27 +341,70 @@ function renderStatusBar() {
   const statusEl = document.getElementById('status-bar');
   clear(statusEl);
 
+  // A dropped Port means everything below is unknown, not clean. Say so and
+  // keep saying so until the reconnect lands and fresh state arrives.
+  if (disconnected) {
+    statusEl.appendChild(
+      h('span', {
+        class: 'status-badge status-error',
+        text: 'Disconnected from the extension (service worker restarted?). Reconnecting; tool state is unknown until then.',
+      }),
+    );
+    return;
+  }
+
   const frames = [...toolsByFrame.values()];
   if (frames.length === 0) {
     statusEl.appendChild(h('span', { class: 'status-badge status-pending', text: 'Waiting for page…' }));
     return;
   }
 
-  const anyModelContext = frames.some((f) => f.hasModelContext);
-  const totalTools = frames.reduce((sum, f) => sum + f.tools.length, 0);
-
-  if (!anyModelContext) {
+  // A frame whose MAIN-world bridge never checked in cannot be inspected at
+  // all. That is a "diagnostics did not run" state, never a clean verdict --
+  // render it as an error, and never let it fall through to "not found".
+  const deadBridges = frames.filter((f) => f.bridge === false);
+  for (const f of deadBridges) {
     statusEl.appendChild(
-      h('span', { class: 'status-badge status-absent', text: 'document.modelContext: not found' }),
-    );
-    statusEl.appendChild(
-      h('p', {
-        class: 'empty-state',
-        text:
-          'No WebMCP tools found on this page. Enable chrome://flags/#enable-webmcp-testing, ' +
-          'or the page must register tools / load the polyfill (@mcp-b/webmcp-polyfill).',
+      h('span', {
+        class: 'status-badge status-error',
+        text: `Bridge did not run${f.origin ? ` in ${f.origin}` : ''}: this frame cannot be inspected. Do not read it as having no tools.`,
       }),
     );
+  }
+
+  const liveFrames = frames.filter((f) => f.bridge !== false);
+  const anyModelContext = liveFrames.some((f) => f.hasModelContext);
+  const totalTools = liveFrames.reduce((sum, f) => sum + f.tools.length, 0);
+
+  // The spec moved the API from navigator to document mid-origin-trial, so
+  // pages written against Chrome 149 may register tools only on the old
+  // surface. Those tools are invisible here (this panel reads
+  // document.modelContext, the current surface) and the page breaks when the
+  // origin trial ends -- both worth telling the user about explicitly.
+  const navOnly = liveFrames.filter((f) => f.surfaces && f.surfaces.navigator && !f.surfaces.document);
+  for (const f of navOnly) {
+    statusEl.appendChild(
+      h('span', {
+        class: 'status-badge status-warn',
+        text: `navigator.modelContext only${f.origin ? ` in ${f.origin}` : ''}: deprecated surface, not readable here, and it stops working when the origin trial ends.`,
+      }),
+    );
+  }
+
+  if (!anyModelContext) {
+    if (liveFrames.length > 0) {
+      statusEl.appendChild(
+        h('span', { class: 'status-badge status-absent', text: 'document.modelContext: not found' }),
+      );
+      statusEl.appendChild(
+        h('p', {
+          class: 'empty-state',
+          text:
+            'No WebMCP tools found on this page. Enable chrome://flags/#enable-webmcp-testing, ' +
+            'or the page must register tools / load the polyfill (@mcp-b/webmcp-polyfill).',
+        }),
+      );
+    }
     return;
   }
 
@@ -245,6 +416,21 @@ function renderStatusBar() {
       text: `document.modelContext: present (${totalTools} ${toolWord} across ${frames.length} ${frameWord})`,
     }),
   );
+
+  // "Present" with no getTools() is a real state (the explainer specifies
+  // registerTool first and leaves discovery as a TODO): the list below is
+  // then only what the bridge observed registering, not a full enumeration.
+  const noGetTools = liveFrames.filter(
+    (f) => f.hasModelContext && f.capabilities && f.capabilities.getTools === false,
+  );
+  for (const f of noGetTools) {
+    statusEl.appendChild(
+      h('span', {
+        class: 'status-badge status-warn',
+        text: `getTools() unavailable${f.origin ? ` in ${f.origin}` : ''}: showing only registrations observed since the bridge loaded, not a full listing.`,
+      }),
+    );
+  }
 
   // A frame that reported an error reading its tools would otherwise be
   // indistinguishable from a frame that genuinely has zero -- surface it so
@@ -300,6 +486,32 @@ function safeLint(tool) {
   }
 }
 
+// The static lint findings, plus the dynamic one only a live panel can make:
+// whether the page changed this tool's definition after it was first
+// announced. Mutating an already-reviewed description, hint, or schema is a
+// known re-framing move against agents (and against the human who reviewed
+// the original), so it grades high; a name or untrusted-content-hint change
+// still warrants a look.
+function findingsFor(frameId, tool) {
+  const findings = safeLint(tool);
+  const fieldSet = tool && typeof tool.toolId === 'string' ? mutatedFields.get(`${frameId}:${tool.toolId}`) : undefined;
+  if (!fieldSet || fieldSet.size === 0) return findings;
+  const fields = [...fieldSet].sort();
+  const highRisk = fields.some((f) => f === 'description' || f === 'readOnlyHint' || f === 'inputSchema');
+  return [
+    ...findings,
+    {
+      id: 'mutated-after-registration',
+      severity: highRisk ? 'high' : 'medium',
+      title: `Tool definition changed after registration (${fields.join(', ')})`,
+      detail:
+        `The page changed this tool's ${fields.join(', ')} after it was first announced. ` +
+        'Re-framing a tool mid-session is how a page gets a reviewed-and-trusted tool to do something else. ' +
+        'Re-read the current definition before trusting or executing it.',
+    },
+  ];
+}
+
 function renderToolsTable() {
   const tbody = document.getElementById('tools-tbody');
   clear(tbody);
@@ -308,7 +520,7 @@ function renderToolsTable() {
   document.getElementById('tools-count').textContent = `${rows.length} tool${rows.length === 1 ? '' : 's'}`;
 
   for (const { frameId, tool } of rows) {
-    const findings = safeLint(tool);
+    const findings = findingsFor(frameId, tool);
     const worst = worstSeverity(findings);
     const isSelected = !!selectedToolKey && selectedToolKey.frameId === frameId && selectedToolKey.toolId === tool.toolId;
 
@@ -348,7 +560,11 @@ function findTool(frameId, toolId) {
 }
 
 function selectTool(frameId, toolId) {
-  selectedToolKey = { frameId, toolId };
+  // The fingerprint freezes what the user actually reviewed. If the page
+  // mutates the tool afterward, the execute handler refuses to run it until
+  // it is re-selected (and therefore re-read) in its current form.
+  const tool = findTool(frameId, toolId);
+  selectedToolKey = { frameId, toolId, fingerprint: tool ? toolFingerprint(tool) : null };
   renderToolsTable();
   renderDetail();
 }
@@ -357,6 +573,7 @@ function renderDetail() {
   const section = document.getElementById('detail-section');
   if (!selectedToolKey) {
     section.hidden = true;
+    lastDetailKey = null;
     return;
   }
 
@@ -364,6 +581,7 @@ function renderDetail() {
   if (!tool) {
     section.hidden = true;
     selectedToolKey = null;
+    lastDetailKey = null;
     return;
   }
 
@@ -377,7 +595,7 @@ function renderDetail() {
 
   const findingsList = document.getElementById('detail-findings');
   clear(findingsList);
-  const findings = [...safeLint(tool)].sort(bySeverityDesc);
+  const findings = [...findingsFor(selectedToolKey.frameId, tool)].sort(bySeverityDesc);
   if (findings.length === 0) {
     findingsList.appendChild(h('li', { class: 'finding-none', text: 'No findings.' }));
   } else {
@@ -392,8 +610,16 @@ function renderDetail() {
     }
   }
 
-  document.getElementById('execute-error').textContent = '';
-  document.getElementById('execute-result').textContent = '';
+  // Only reset the execute panes when the selection itself changes. Clearing
+  // them on every render pass let any page that fires toolchange in a loop
+  // erase a result out from under the user -- including one they were about
+  // to notice.
+  const detailKey = `${selectedToolKey.frameId}:${selectedToolKey.toolId}`;
+  if (lastDetailKey !== detailKey) {
+    lastDetailKey = detailKey;
+    document.getElementById('execute-error').textContent = '';
+    document.getElementById('execute-result').textContent = '';
+  }
 }
 
 function renderTimeline() {
@@ -415,10 +641,37 @@ function renderTimelineEntry(entry) {
     ]);
   }
 
+  // What actually changed between two announcements: added / removed /
+  // mutated tool names, and for mutations, which fields. All page-derived
+  // strings, so everything renders through h() as text.
+  if (entry.type === 'toolset') {
+    const added = Array.isArray(entry.added) ? entry.added : [];
+    const removed = Array.isArray(entry.removed) ? entry.removed : [];
+    const mutated = Array.isArray(entry.mutated) ? entry.mutated : [];
+    const parts = [];
+    if (added.length) parts.push(`added: ${added.join(', ')}`);
+    if (removed.length) parts.push(`removed: ${removed.join(', ')}`);
+    for (const m of mutated) {
+      const fields = m && Array.isArray(m.fields) ? m.fields.join(', ') : '';
+      parts.push(`changed: ${m && m.name ? m.name : '(unnamed tool)'} (${fields})`);
+    }
+    const li = h('li', { class: `timeline-item timeline-toolset${mutated.length ? ' timeline-mutation' : ''}` }, [
+      h('span', { class: 'timeline-time', text: time }),
+      h('span', { class: 'timeline-kind', text: 'tool set changed' }),
+      h('span', { class: 'timeline-origin', text: entry.origin || '' }),
+    ]);
+    li.appendChild(h('pre', { class: 'timeline-diff', text: parts.join('\n') }));
+    return li;
+  }
+
+  const observed = entry.initiator === 'page';
   const statusText = entry.ok ? 'ok' : 'error';
   const li = h('li', { class: `timeline-item timeline-call timeline-${statusText}` }, [
     h('span', { class: 'timeline-time', text: time }),
-    h('span', { class: 'timeline-kind', text: `call: ${entry.toolName || '(unknown)'}` }),
+    h('span', {
+      class: 'timeline-kind',
+      text: `${observed ? 'observed call' : 'call'}: ${entry.toolName || '(unknown)'}`,
+    }),
     h('span', { class: 'timeline-status', text: statusText }),
   ]);
 
