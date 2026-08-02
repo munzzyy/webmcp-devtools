@@ -86,23 +86,29 @@
             tools.sort((a, b) => a.name.localeCompare(b.name)); // spec: sorted by name
             return tools;
           },
-          async executeTool(tool, argsJson) {
+          async executeTool(tool, args) {
             const entry = registry.get(tool && tool.name);
             if (!entry) throw new Error(`Unknown tool: ${tool && tool.name}`);
-            let args;
-            try {
-              args = JSON.parse(argsJson);
-            } catch (err) {
-              throw new Error(`Invalid arguments JSON: ${err.message}`);
+            // The explainer's handlers take a parsed object; older shims
+            // passed a JSON string. Accept both, like the extension does.
+            let parsed = args;
+            if (typeof args === 'string') {
+              try {
+                parsed = JSON.parse(args);
+              } catch (err) {
+                throw new Error(`Invalid arguments JSON: ${err.message}`);
+              }
             }
-            return entry.handler(args);
+            return entry.handler(parsed);
           },
         });
 
-        // Plain assignment on the `document` instance -- the same DOM object a
-        // content script's isolated world sees, so this shim is visible to
-        // content.js exactly like the native attribute or a real polyfill would
-        // be, without needing `world: "MAIN"` injection.
+        // Plain assignment on the `document` instance. A JS expando like this
+        // is page-world only -- an isolated-world content script shares the
+        // DOM but not expandos, which is exactly why the extension reads
+        // modelContext from a MAIN-world script (page-bridge.js) and relays
+        // it out. This shim is visible to that bridge the same way a real
+        // polyfill would be.
         document.modelContext = modelContext;
 
         // ---- sample tools -----------------------------------------------------

@@ -4,11 +4,10 @@
 // from `document.modelContext.getTools()`. No chrome.* dependency -- this
 // file is unit-tested directly with Node's built-in test runner.
 //
-// The WebMCP spec has `inputSchema` come back as a JSON STRING on the tool
-// object, but this function tolerates either a string or an already-parsed
-// object (defensive against future spec changes, polyfills, and the demo
-// page). It never throws: malformed input degrades to a safe, clearly
-// labeled shape instead of crashing the panel. Every field on `raw` is
+// The WebMCP explainer shows `inputSchema` as a plain object, but legacy
+// shims and some polyfills hand over a JSON string instead, so this function
+// tolerates either shape. It never throws: malformed input degrades to a
+// safe, clearly labeled shape instead of crashing the panel. Every field on `raw` is
 // page-controlled, untrusted data -- this module only reshapes it, it never
 // renders it (rendering with textContent-only is panel.js's job).
 
