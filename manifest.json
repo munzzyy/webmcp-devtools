@@ -21,6 +21,14 @@
       "all_frames": true,
       "match_about_blank": false,
       "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["page-bridge.js"],
+      "all_frames": true,
+      "match_about_blank": false,
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "permissions": []

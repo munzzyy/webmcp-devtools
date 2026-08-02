@@ -1,256 +1,145 @@
 // content.js
 //
-// Isolated-world bridge. Injected into every frame of every page at
-// document_start (see manifest.json). Reads `document.modelContext` directly
-// -- it's a native WebIDL attribute on Document, shared with the page's
-// main-world DOM, so an isolated-world content script can see it with no
-// `world: "MAIN"` injection needed. Works identically whether
-// document.modelContext is the native (flagged) implementation or a page
-// -loaded polyfill (e.g. @mcp-b/webmcp-polyfill) -- both are just reading a
-// Document property.
+// Isolated-world half of the bridge. Chrome isolated worlds share DOM nodes
+// but NOT JS expando properties, so this script cannot read a page-installed
+// `document.modelContext` itself -- that is page-bridge.js's job, running in
+// the MAIN world (see manifest.json; this file runs first, the bridge second,
+// both at document_start and both before any page script).
 //
-// SECURITY: everything read off `document.modelContext` (tool name,
-// description, inputSchema, annotation values) is page-controlled, untrusted
-// data. This file never evals it and never touches innerHTML with it -- it
-// only relays it as inert data. The only place page strings ever touch a DOM
-// tree is panel.js, and only via textContent/createElement (see panel.js).
+// This file's job is the privileged side: it alone holds the
+// chrome.runtime Port to the background relay, so the page never touches an
+// extension API. It generates a per-frame nonce, hands it to the bridge
+// through a DOM attribute that is set and consumed before the page can run,
+// and then forwards only well-formed, nonce-carrying bridge messages to the
+// panel -- and panel commands back to the bridge.
+//
+// SECURITY: everything relayed here (tool name, description, inputSchema,
+// annotation values) is page-controlled, untrusted data. This file never
+// evals it and never touches the DOM with it -- it only relays it as inert
+// data. The only place page strings ever touch a DOM tree is panel.js, and
+// only via textContent/createTextNode (see panel.js).
 
-const port = chrome.runtime.connect({ name: 'webmcp-content' });
+(() => {
+  'use strict';
 
-// Live tool objects can't be structured-cloned across the messaging boundary
-// (each one carries a `window` reference), so the actual objects returned by
-// getTools() are cached here, keyed by a stable positional toolId (the tool's
-// index in getTools()), and only a serializable projection of each is ever
-// sent to the panel. Keying by id, not name, keeps two same-named tools --
-// or several unnamed ones -- from collapsing onto each other, so
-// executeTool-by-id runs exactly the tool the panel row points at.
-let toolCache = new Map();
+  // Message types the bridge is allowed to send upward. Anything else is
+  // dropped, so a forged message cannot invent new panel behavior.
+  const BRIDGE_TYPES = new Set(['status', 'tools', 'toolchange', 'observedCall', 'executeResult']);
+  const PANEL_TYPES = new Set(['getTools', 'executeTool']);
+  const BRIDGE_TIMEOUT_MS = 2000;
+  const RECONNECT_BASE_MS = 250;
+  const RECONNECT_MAX_MS = 5000;
 
-let pollTimer = null;
-let toolchangeListenerAttached = false;
+  const nonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-detectAndAnnounce();
-pollForModelContext();
+  let bridgeReady = false;
+  let port = null;
+  let reconnectDelay = RECONNECT_BASE_MS;
 
-port.onMessage.addListener((msg) => {
-  if (!msg || typeof msg !== 'object') return;
-  if (msg.type === 'getTools') {
-    void announceTools();
-  } else if (msg.type === 'executeTool') {
-    void handleExecuteTool(msg);
-  }
-});
-
-function hasModelContext() {
-  return (
-    typeof document !== 'undefined' &&
-    !!document.modelContext &&
-    typeof document.modelContext.getTools === 'function'
-  );
-}
-
-function detectAndAnnounce() {
-  postSafe({
-    type: 'status',
-    origin: safeOrigin(),
-    hasModelContext: hasModelContext(),
-    toolCount: toolCache.size,
-  });
-  if (hasModelContext()) {
-    attachToolchangeListener();
-    void announceTools();
-  }
-}
-
-// document.modelContext may not exist yet at document_start -- a polyfill or
-// the page's own script can install it later in the page load. Poll briefly
-// for its appearance instead of only ever checking once.
-function pollForModelContext() {
-  if (hasModelContext()) return;
-  const start = Date.now();
-  const maxMs = 30000;
-  pollTimer = setInterval(() => {
-    if (hasModelContext()) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-      detectAndAnnounce();
-      return;
-    }
-    if (Date.now() - start > maxMs) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }, 500);
-}
-
-function attachToolchangeListener() {
-  if (toolchangeListenerAttached || !hasModelContext()) return;
-  try {
-    document.modelContext.addEventListener('toolchange', () => {
-      postSafe({ type: 'toolchange', origin: safeOrigin(), timestamp: Date.now() });
-      void announceTools();
-    });
-    toolchangeListenerAttached = true;
-  } catch (err) {
-    // A hostile or broken polyfill could throw here; never let that break the bridge.
-  }
-}
-
-async function announceTools() {
-  if (!hasModelContext()) {
-    postSafe({ type: 'tools', origin: safeOrigin(), hasModelContext: false, tools: [] });
-    return;
-  }
-  try {
-    const rawTools = await document.modelContext.getTools();
-    if (!Array.isArray(rawTools)) {
-      // A conforming getTools() resolves to an array. Report the shape instead
-      // of silently coercing to an empty list, which reads as "0 tools" and
-      // hides a broken page.
-      postSafe({
-        type: 'tools',
-        origin: safeOrigin(),
-        hasModelContext: true,
-        tools: [],
-        error: `getTools() returned ${typeof rawTools}, not an array`,
-      });
-      return;
-    }
-    toolCache = new Map();
-    const projected = [];
-    for (let i = 0; i < rawTools.length; i += 1) {
-      const raw = rawTools[i];
-      const toolId = String(i);
-      toolCache.set(toolId, raw);
-      projected.push(projectTool(raw, toolId));
-    }
-    postSafe({ type: 'tools', origin: safeOrigin(), hasModelContext: true, tools: projected });
-  } catch (err) {
-    postSafe({
-      type: 'tools',
-      origin: safeOrigin(),
-      hasModelContext: true,
-      tools: [],
-      error: describeError(err),
-    });
-  }
-}
-
-// Strips non-cloneable/live fields (crucially `window`) and otherwise leaves
-// the tool exactly as the page provided it -- including inputSchema, which
-// may still be the raw JSON string. Real parsing/normalization happens in
-// panel.js via core/normalizeTool.js, not here, so that logic exists in one
-// pure, unit-tested place.
-function projectTool(raw, toolId) {
-  const src = raw && typeof raw === 'object' ? raw : {};
-  return {
-    toolId,
-    name: src.name,
-    description: src.description,
-    inputSchema: src.inputSchema,
-    annotations: src.annotations,
-    origin: typeof src.origin === 'string' ? src.origin : safeOrigin(),
-  };
-}
-
-async function handleExecuteTool(msg) {
-  const { callId, toolId, toolName, argsJson } = msg;
-  const timestamp = Date.now();
-
-  if (!hasModelContext()) {
-    postSafe({
-      type: 'executeResult',
-      callId,
-      toolId,
-      toolName,
-      argsJson,
-      ok: false,
-      error: 'document.modelContext is not present on this page',
-      timestamp,
-    });
-    return;
-  }
-
-  const tool = toolCache.get(toolId);
-  if (!tool) {
-    postSafe({
-      type: 'executeResult',
-      callId,
-      toolId,
-      toolName,
-      argsJson,
-      ok: false,
-      error: `Unknown tool "${toolName}" -- try Refresh to reload the tool list first`,
-      timestamp,
-    });
-    return;
-  }
-
-  try {
-    const result = await document.modelContext.executeTool(tool, argsJson);
-    postSafe({
-      type: 'executeResult',
-      callId,
-      toolId,
-      toolName,
-      argsJson,
-      ok: true,
-      result: toCloneable(result),
-      timestamp,
-    });
-  } catch (err) {
-    postSafe({
-      type: 'executeResult',
-      callId,
-      toolId,
-      toolName,
-      argsJson,
-      ok: false,
-      error: describeError(err),
-      timestamp,
-    });
-  }
-}
-
-// executeTool's result is entirely page-defined and might not be
-// structured-clone safe. Round-trip it through JSON so postMessage below can
-// never throw a DataCloneError; anything that can't survive JSON becomes a
-// plain string instead of crashing the bridge.
-function toCloneable(value) {
-  if (value === undefined) return null;
-  try {
-    return JSON.parse(JSON.stringify(value));
-  } catch (err) {
+  // Handshake: the MAIN-world bridge runs immediately after this script and
+  // consumes the attribute before any page script exists to observe it.
+  const root = document.documentElement;
+  if (root) {
     try {
-      return String(value);
-    } catch (err2) {
-      return null;
+      root.setAttribute('data-webmcp-devtools-nonce', nonce);
+    } catch (err) {
+      // if this fails the bridge stays inert and the timeout below reports it
     }
   }
-}
 
-function postSafe(message) {
-  try {
-    port.postMessage(message);
-  } catch (err) {
-    // Extension context invalidated (e.g. the extension was reloaded) or the
-    // port already closed; nothing this frame can do about it.
-  }
-}
+  connectPort();
 
-function safeOrigin() {
-  try {
-    return location.origin;
-  } catch (err) {
-    return '';
-  }
-}
+  window.addEventListener('message', (event) => {
+    // Same-window only: a cross-origin frame's postMessage arrives with its
+    // own window proxy as `source` and is rejected here.
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data.webmcpDevtools !== 'bridge' || data.nonce !== nonce) return;
+    if (data.type === 'bridge-ready') {
+      bridgeReady = true;
+      return;
+    }
+    if (typeof data.type !== 'string' || !BRIDGE_TYPES.has(data.type)) return;
+    const msg = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key !== 'webmcpDevtools' && key !== 'nonce') msg[key] = value;
+    }
+    if (data.type === 'status') msg.bridge = true;
+    postSafe(msg);
+  });
 
-function describeError(err) {
-  if (err instanceof Error) return err.message;
-  try {
-    return String(err);
-  } catch (_e) {
-    return 'Unknown error';
+  // If the bridge never checks in, this page cannot be inspected at all.
+  // Say so explicitly: a silent "not found" here would be indistinguishable
+  // from a clean page, which is the one failure mode a security tool must
+  // never have.
+  setTimeout(() => {
+    if (bridgeReady) return;
+    postSafe({
+      type: 'status',
+      origin: safeOrigin(),
+      bridge: false,
+      hasModelContext: false,
+      surfaces: { document: false, navigator: false },
+      capabilities: {},
+      observing: {},
+      toolCount: 0,
+    });
+  }, BRIDGE_TIMEOUT_MS);
+
+  function onPanelMessage(msg) {
+    if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string' || !PANEL_TYPES.has(msg.type)) return;
+    reconnectDelay = RECONNECT_BASE_MS; // traffic means the port is healthy
+    forwardToBridge(msg);
   }
-}
+
+  function forwardToBridge(msg) {
+    try {
+      window.postMessage(Object.assign({ webmcpDevtools: 'content', nonce }, msg), '*');
+    } catch (err) {
+      // non-cloneable panel message; nothing to relay
+    }
+  }
+
+  // An MV3 service-worker cycle (extension reload, update, worker crash, the
+  // chrome://extensions toggle) closes this Port. Without reconnecting, the
+  // frame goes silent forever and the panel keeps showing stale tools --
+  // reconnect with capped backoff, then re-announce through the bridge.
+  function connectPort() {
+    let p;
+    try {
+      p = chrome.runtime.connect({ name: 'webmcp-content' });
+    } catch (err) {
+      return; // extension context invalidated; a page reload starts fresh
+    }
+    port = p;
+    p.onMessage.addListener(onPanelMessage);
+    p.onDisconnect.addListener(() => {
+      if (port === p) port = null;
+      const delay = reconnectDelay;
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+      setTimeout(() => {
+        connectPort();
+        if (port) forwardToBridge({ type: 'getTools' });
+      }, delay);
+    });
+  }
+
+  function postSafe(message) {
+    if (!port) return;
+    try {
+      port.postMessage(message);
+    } catch (err) {
+      // port already closed; onDisconnect drives the reconnect
+    }
+  }
+
+  function safeOrigin() {
+    try {
+      return location.origin;
+    } catch (err) {
+      return '';
+    }
+  }
+})();

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>webmcp-devtools e2e fixture: registerTool page</title>
+  </head>
+  <body>
+    <h1>registerTool fixture page</h1>
+    <p id="status">installing modelContext…</p>
+    <script>
+      // A spec-shaped page-world polyfill: registerTool + toolchange (the
+      // committed half of the WebMCP explainer) plus getTools/executeTool in
+      // the Chrome implementation's shape. Installed by the page itself, so
+      // only a MAIN-world script can see it -- which is exactly what the e2e
+      // run proves.
+      (() => {
+        const registry = new Map();
+        const target = new EventTarget();
+        const mc = Object.assign(target, {
+          async registerTool(descriptor, options) {
+            registry.set(descriptor.name, descriptor);
+            target.dispatchEvent(new Event('toolchange'));
+          },
+          async getTools() {
+            return [...registry.values()];
+          },
+          async executeTool(tool, args) {
+            const desc = registry.get(tool && tool.name);
+            if (!desc) throw new Error('Unknown tool: ' + (tool && tool.name));
+            return desc.execute(args);
+          },
+        });
+        document.modelContext = mc;
+
+        // A page script trying to steal the handshake nonce must come up empty:
+        // the bridge consumed the attribute before any page script ran.
+        const stealEl = document.createElement('div');
+        stealEl.id = 'nonce-steal';
+        stealEl.textContent = 'nonce-steal:' + String(document.documentElement.getAttribute('data-webmcp-devtools-nonce'));
+        document.body.appendChild(stealEl);
+
+        document.modelContext.registerTool({
+          name: 'getInventory',
+          description: 'List the items in the demo inventory.',
+          inputSchema: { type: 'object', properties: { limit: { type: 'integer' } } },
+          annotations: { readOnlyHint: true },
+          async execute(args) {
+            return { items: ['apple', 'anvil'], limit: args && args.limit };
+          },
+        });
+        document.getElementById('status').textContent = 'modelContext installed, 1 tool registered';
+
+        // Page-initiated call, after the bridge's 500ms detection poll has
+        // had time to wrap executeTool: this is the "agent called a tool"
+        // case the timeline must observe.
+        setTimeout(() => {
+          document.modelContext.executeTool({ name: 'getInventory' }, { limit: 2 });
+        }, 900);
+
+        // Late registration goes through the wrapped registerTool and fires
+        // toolchange, so the tool list update must be relayed too.
+        setTimeout(() => {
+          document.modelContext.registerTool({
+            name: 'addNote',
+            description: 'Add a note to the fixture page.',
+            inputSchema: { type: 'object', properties: { text: { type: 'string', maxLength: 100 } } },
+            annotations: {},
+            async execute() {
+              return { ok: true };
+            },
+          });
+        }, 1400);
+      })();
+    </script>
+  </body>
+</html>

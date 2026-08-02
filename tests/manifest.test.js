@@ -36,14 +36,26 @@ test('manifest.json declares a background service worker', () => {
   assert.equal(manifest.background.service_worker, 'background.js');
 });
 
-test('manifest.json registers content.js as an all_frames, document_start content script', () => {
+test('manifest.json registers the isolated relay and the MAIN-world bridge, in that order', () => {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  assert.ok(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length === 1);
-  const [entry] = manifest.content_scripts;
-  assert.deepEqual(entry.js, ['content.js']);
-  assert.equal(entry.all_frames, true);
-  assert.equal(entry.run_at, 'document_start');
-  assert.ok(Array.isArray(entry.matches) && entry.matches.length > 0);
+  // Exactly two entries, and the order is load-bearing: content.js (isolated)
+  // must run first to leave the handshake nonce on <html>, and page-bridge.js
+  // (MAIN world) must run immediately after to consume it -- both at
+  // document_start, before any page script exists to observe the attribute.
+  assert.ok(Array.isArray(manifest.content_scripts) && manifest.content_scripts.length === 2);
+  const [relay, bridge] = manifest.content_scripts;
+
+  assert.deepEqual(relay.js, ['content.js']);
+  assert.equal(relay.all_frames, true);
+  assert.equal(relay.run_at, 'document_start');
+  assert.notEqual(relay.world, 'MAIN'); // the Port holder must stay isolated
+  assert.ok(Array.isArray(relay.matches) && relay.matches.length > 0);
+
+  assert.deepEqual(bridge.js, ['page-bridge.js']);
+  assert.equal(bridge.all_frames, true);
+  assert.equal(bridge.run_at, 'document_start');
+  assert.equal(bridge.world, 'MAIN'); // page-installed modelContext is only visible here
+  assert.deepEqual(bridge.matches, relay.matches);
 });
 
 test('manifest.json requires Chrome 150+ (the WebMCP-shipping version)', () => {
