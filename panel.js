@@ -286,12 +286,15 @@ function safeLint(tool) {
     return out;
   } catch (err) {
     // lint.js is a swappable module; a bug in it should never crash the panel.
+    // But a lint pass that died on page-controlled input must never read as
+    // safer than a clean tool -- the input that killed the linter is exactly
+    // the input that deserves suspicion. Report loudly, at high severity.
     return [
       {
         id: 'lint-threw',
-        severity: 'info',
-        title: 'Diagnostics failed',
-        detail: err && err.message ? String(err.message) : String(err),
+        severity: 'high',
+        title: 'Diagnostics did not run',
+        detail: `The linter threw on this tool (${err && err.message ? String(err.message) : String(err)}). Treat it as unreviewed, not as clean.`,
       },
     ];
   }

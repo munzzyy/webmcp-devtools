@@ -59,8 +59,11 @@ const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z
 // Parameter names that are dangerous when free-form (arbitrary payload passthrough).
 const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|filepath|file|url|uri|endpoint|host|redirect|callback|prompt|template|html|payload)$/i;
 
-// Invisible / deceptive Unicode.
-function scanUnicode(field, text) {
+// Invisible / deceptive Unicode. `path` narrows the finding to an exact spot
+// inside a larger field (e.g. a schema property description); the title keeps
+// the coarse field name so repeats of one payload dedupe to a single finding.
+function scanUnicode(field, text, path) {
+  const at = path ? `At ${path}: ` : '';
   const out = [];
   let index = 0;
   for (const ch of text) {
@@ -73,13 +76,13 @@ function scanUnicode(field, text) {
     }
     if (cp >= 0xe0000 && cp <= 0xe007f) {
       out.push(finding('uni-tag', 'critical', `Invisible Unicode tag character in ${field}`,
-        `U+${hex(cp)} is an invisible tag character, the standard way to smuggle hidden instructions into text the agent reads but a human does not.`));
+        `${at}U+${hex(cp)} is an invisible tag character, the standard way to smuggle hidden instructions into text the agent reads but a human does not.`));
     } else if ((cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) {
       out.push(finding('uni-bidi', 'critical', `Bidirectional control character in ${field}`,
-        `U+${hex(cp)} can make the rendered text differ from what is parsed (Trojan Source).`));
+        `${at}U+${hex(cp)} can make the rendered text differ from what is parsed (Trojan Source).`));
     } else if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || (cp >= 0x2061 && cp <= 0x2064) || cp === 0xfeff || cp === 0x00ad) {
       out.push(finding('uni-zw', 'high', `Zero-width / invisible character in ${field}`,
-        `U+${hex(cp)} is invisible and is often used to hide or break up text so a reviewer misses it.`));
+        `${at}U+${hex(cp)} is invisible and is often used to hide or break up text so a reviewer misses it.`));
     }
     index += 1;
   }
@@ -105,6 +108,129 @@ function dedupeByTitle(list) {
   return out;
 }
 
+// JSON.stringify with no guard is a page-triggerable crash: a schema with a
+// self-reference throws TypeError, a BigInt value throws too, and both survive
+// the structured-clone trip from the page intact. If lintTool throws, the
+// panel's fallback used to be the only finding the user saw -- so one hostile
+// key silently erased every real finding. Serialize defensively instead, and
+// treat "cannot be serialized" as a signal in its own right.
+function safeSchemaJson(schema) {
+  try {
+    return { json: JSON.stringify(schema), unserializable: false, reason: null };
+  } catch (err) {
+    const reason = err && err.message ? String(err.message) : String(err);
+    return { json: serializeLossy(schema, [], 0), unserializable: true, reason };
+  }
+}
+
+const MAX_SERIALIZE_DEPTH = 32;
+
+function serializeLossy(value, ancestors, depth) {
+  if (value === null) return 'null';
+  const t = typeof value;
+  if (t === 'string' || t === 'number' || t === 'boolean') return JSON.stringify(value);
+  if (t === 'bigint') return JSON.stringify(`${value}n`);
+  if (t === 'function' || t === 'symbol' || t === 'undefined') return '"[Unserializable]"';
+  if (depth >= MAX_SERIALIZE_DEPTH) return '"[MaxDepth]"';
+  if (ancestors.includes(value)) return '"[Circular]"';
+  ancestors.push(value);
+  let out;
+  try {
+    if (Array.isArray(value)) {
+      out = `[${value.map((v) => serializeLossy(v, ancestors, depth + 1)).join(',')}]`;
+    } else {
+      const parts = [];
+      for (const [k, v] of Object.entries(value)) {
+        parts.push(`${JSON.stringify(k)}:${serializeLossy(v, ancestors, depth + 1)}`);
+      }
+      out = `{${parts.join(',')}}`;
+    }
+  } catch (err) {
+    out = '"[Unreadable]"';
+  }
+  ancestors.pop();
+  return out;
+}
+
+// Keys whose string values are read by the agent as part of the tool
+// definition. MCP clients feed schema `description`/`title` text into the
+// prompt exactly like the top-level description, which makes them the most
+// obvious place to hide an injection that a description-only scan misses.
+const SCHEMA_TEXT_KEYS = new Set(['description', 'title', 'const']);
+const MAX_SCHEMA_DEPTH = 12;
+
+// Walks the schema and collects every agent-readable string with the path it
+// was found at: property names, and description/title/const/enum string
+// values. Bounded by depth and by a shared character budget so a hostile
+// schema cannot turn the walk itself into the DoS.
+function collectSchemaStrings(schema, budgetChars) {
+  const out = [];
+  let budget = budgetChars;
+  let truncated = false;
+
+  const take = (path, text) => {
+    if (budget <= 0) {
+      truncated = true;
+      return;
+    }
+    let clipped = text;
+    if (text.length > budget) {
+      clipped = text.slice(0, budget);
+      truncated = true;
+    }
+    budget -= clipped.length;
+    out.push({ path, text: clipped });
+  };
+
+  const visit = (node, path, ancestors, depth) => {
+    if (!node || typeof node !== 'object') return;
+    if (depth > MAX_SCHEMA_DEPTH) {
+      truncated = true;
+      return;
+    }
+    if (ancestors.includes(node)) return;
+    ancestors.push(node);
+    let entries;
+    try {
+      entries = Object.entries(node);
+    } catch (err) {
+      ancestors.pop();
+      return;
+    }
+    for (const [key, value] of entries) {
+      if (budget <= 0) {
+        truncated = true;
+        break;
+      }
+      const childPath = `${path}.${key}`;
+      if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
+        let propEntries;
+        try {
+          propEntries = Object.entries(value);
+        } catch (err) {
+          continue;
+        }
+        for (const [propName, spec] of propEntries) {
+          take(`${path}.properties (property name)`, propName);
+          visit(spec, `${childPath}.${propName}`, ancestors, depth + 1);
+        }
+      } else if (typeof value === 'string' && SCHEMA_TEXT_KEYS.has(key)) {
+        take(childPath, value);
+      } else if (key === 'enum' && Array.isArray(value)) {
+        for (let i = 0; i < value.length; i += 1) {
+          if (typeof value[i] === 'string') take(`${childPath}[${i}]`, value[i]);
+        }
+      } else if (value && typeof value === 'object') {
+        visit(value, childPath, ancestors, depth + 1);
+      }
+    }
+    ancestors.pop();
+  };
+
+  visit(schema, 'inputSchema', [], 0);
+  return { strings: out, truncated };
+}
+
 export function lintTool(tool) {
   const t = tool && typeof tool === 'object' ? tool : {};
   const name = typeof t.name === 'string' ? t.name : '';
@@ -117,15 +243,24 @@ export function lintTool(tool) {
   // at hostile, page-controlled metadata, so a page can hand us a megabyte of
   // text purely to make the regex work expensive. 16 KB is far more than any
   // real tool field needs; anything past it is scanned truncated and the
-  // truncation is reported as its own finding.
+  // truncation is reported as its own finding. The name gets the same cap as
+  // everything else: it flows into the injection loop, the code-point scan,
+  // and the word splitter, all of which are linear-or-worse in its length.
   const MAX_SCAN = 16384;
-  const schemaJson = JSON.stringify(schema);
+  const { json: schemaJson, unserializable, reason: unserializableReason } = safeSchemaJson(schema);
+  const nameScan = name.length > MAX_SCAN ? name.slice(0, MAX_SCAN) : name;
   const descScan = description.length > MAX_SCAN ? description.slice(0, MAX_SCAN) : description;
   const schemaScan = schemaJson.length > MAX_SCAN ? schemaJson.slice(0, MAX_SCAN) : schemaJson;
+  const nameDisplay = name.length > 80 ? `${name.slice(0, 77)}...` : name;
+
+  if (unserializable) {
+    findings.push(finding('unserializable', 'medium', 'Input schema cannot be serialized',
+      `JSON.stringify on this schema threw (${unserializableReason}). A circular reference or exotic value in a tool schema is a strong sign the page is trying to break inspection tooling; the schema was scanned in a degraded form.`));
+  }
 
   // Name and description are the strings the agent actually reads, so injection
   // phrasing there lands directly in its context.
-  for (const [fieldName, value] of [['name', name], ['description', descScan]]) {
+  for (const [fieldName, value] of [['name', nameScan], ['description', descScan]]) {
     // NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
     // fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII,
     // so a phrase spelled in look-alike Unicode reads the same as the plain
@@ -148,8 +283,27 @@ export function lintTool(tool) {
 
   // Zero-width and bidi characters survive copy-paste but never render, which is
   // what makes them the classic carrier for hidden instructions.
-  findings.push(...scanUnicode('name', name));
-  findings.push(...scanUnicode('description', description));
+  findings.push(...scanUnicode('name', nameScan));
+  findings.push(...scanUnicode('description', descScan));
+
+  // Schema description/title/const/enum strings and property names reach the
+  // agent verbatim as part of the tool definition, so they get the exact same
+  // injection and hidden-Unicode treatment as the top-level fields. Findings
+  // carry the path (e.g. inputSchema.properties.text.description); titles stay
+  // coarse so one payload repeated across ten properties dedupes to one finding.
+  const { strings: schemaStrings, truncated: schemaWalkTruncated } = collectSchemaStrings(schema, MAX_SCAN);
+  const schemaFindings = [];
+  for (const { path, text } of schemaStrings) {
+    const normalized = String(text).normalize('NFKC');
+    const folded = normalized.replace(/[\s_*~`-]+/g, ' ');
+    for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
+      if (rx.test(normalized) || rx.test(folded)) {
+        schemaFindings.push(finding('inject', severity, `${title} (inputSchema)`, `At ${path}: ${detail}`));
+      }
+    }
+    schemaFindings.push(...scanUnicode('inputSchema', text, path));
+  }
+  findings.push(...dedupeByTitle(schemaFindings));
 
   const sinkHit = SINK.exec(descScan) || SINK.exec(schemaScan);
   if (sinkHit) {
@@ -181,7 +335,7 @@ export function lintTool(tool) {
   // smell. It rises to the high capability finding when it sits right next to a
   // word that implies actually running something: systemExec, shellRun, doEval.
   const actionWord = /^(?:exec|eval|shell|system|run|execute|invoke|call|do|spawn|launch|command|cmd|code|script|query|sql|raw|arbitrary)$/i;
-  const nameWords = name.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+  const nameWords = nameScan.split(/[^a-zA-Z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
   let dangerPair = false;
   let loneDanger = false;
   for (let i = 0; i < nameWords.length; i += 1) {
@@ -192,17 +346,17 @@ export function lintTool(tool) {
     if (neighbourIsAction) dangerPair = true;
     else loneDanger = true;
   }
-  if (dangerText.test(descScan) || dangerName.test(name) || dangerPair) {
+  if (dangerText.test(descScan) || dangerName.test(nameScan) || dangerPair) {
     findings.push(finding('capability', 'high', 'Exposes arbitrary code or command execution',
       'This tool appears to run arbitrary commands, code, or queries. Exposed to an agent, any successful injection becomes remote code execution. Constrain it to specific, named operations.'));
   } else if (loneDanger) {
     findings.push(finding('capability', 'low', 'Name hints at command or code execution',
-      `"${name}" contains an execution-related word (exec, eval, shell, or system). On its own that is only a naming smell, but if this tool does run commands or code, constrain it to specific, named operations and describe it accurately.`));
+      `"${nameDisplay}" contains an execution-related word (exec, eval, shell, or system). On its own that is only a naming smell, but if this tool does run commands or code, constrain it to specific, named operations and describe it accurately.`));
   }
 
-  if (isReadShaped(name) && annotations.readOnlyHint !== true) {
+  if (isReadShaped(nameScan) && annotations.readOnlyHint !== true) {
     findings.push(finding('mismatch', 'low', 'Read-shaped name is not marked read-only',
-      `"${name}" reads like a lookup but readOnlyHint is not set. If it does mutate state the name is misleading; if it does not, set readOnlyHint so agents can treat it safely.`));
+      `"${nameDisplay}" reads like a lookup but readOnlyHint is not set. If it does mutate state the name is misleading; if it does not, set readOnlyHint so agents can treat it safely.`));
   }
 
   if (annotations.untrustedContentHint === true) {
@@ -217,9 +371,9 @@ export function lintTool(tool) {
     findings.push(finding('nodesc', 'low', 'Tool has no description',
       'A tool with no description gives the agent nothing to reason about and cannot be reviewed.'));
   }
-  if (description.length > MAX_SCAN || schemaJson.length > MAX_SCAN) {
+  if (name.length > MAX_SCAN || description.length > MAX_SCAN || schemaJson.length > MAX_SCAN || schemaWalkTruncated) {
     findings.push(finding('truncated', 'low', 'Oversized tool metadata (scanned first 16 KB)',
-      'The description or schema is larger than 16 KB, so only the first 16 KB was scanned for injection and exfiltration patterns. An oversized tool field is itself unusual for a legitimate tool.'));
+      'The name, description, or schema is larger than 16 KB (or the schema nests deeper than the scan limit), so only part of it was scanned for injection and exfiltration patterns. Oversized tool metadata is itself unusual for a legitimate tool.'));
   }
 
   return findings;
