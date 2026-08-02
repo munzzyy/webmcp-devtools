@@ -21,7 +21,7 @@ chrome.runtime.onConnect.addListener((port) => {
   } else if (port.name === 'webmcp-panel') {
     // A real DevTools panel connects from the extension context and has no
     // sender.tab. Anything claiming to be a panel from a tab is a content
-    // script spoofing one to bind to and drive another tab — reject it.
+    // script spoofing one to bind to and drive another tab -- reject it.
     if (port.sender && port.sender.tab) return;
     handlePanelConnect(port);
   }

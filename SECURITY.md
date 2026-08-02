@@ -9,12 +9,23 @@ its own.
 
 The trust boundary is page → panel. Page-controlled strings must render inert:
 a tool description that gets a script executed in the panel's (privileged)
-extension context is the vulnerability that matters most here. The content
-script also injects a page-world probe to read `document.modelContext`; a page
-that can use that probe to reach the extension's APIs, or to see anything it
-couldn't already see, is a close second. Lint bypasses - a malicious tool
-definition the linter explicitly claims to catch but grades clean - are
-security reports too.
+extension context is the vulnerability that matters most here.
+
+The second boundary is the world bridge. `page-bridge.js` runs in the MAIN
+world to read `document.modelContext` where a page-installed one actually
+lives; it holds no `chrome.*` access. `content.js` runs in the isolated world,
+alone holds the `chrome.runtime` Port, and only relays well-formed,
+nonce-carrying, allowlisted message types. A page that can use the bridge to
+reach the extension's APIs, or to see anything it couldn't already see, is a
+serious report. Note what is NOT a boundary: the handshake nonce is readable
+by the page once messages flow, and forged bridge messages can only
+misrepresent the page's own tools, which the page could do anyway by
+registering them.
+
+Lint bypasses - a malicious tool definition the linter explicitly claims to
+catch but grades clean - are security reports too. So is any fail-open you
+find: a broken diagnostic path that renders as a clean verdict instead of
+saying it did not run.
 
 ## Reporting a vulnerability
 
@@ -27,4 +38,5 @@ Include what you found, how to reproduce it, and the impact you'd expect.
 
 ## Supported versions
 
-Fixes land on the latest tagged version; there's no backport policy.
+Fixes land on main; there are no tagged releases yet and no backport policy.
+When tags exist, the latest one is the supported version.

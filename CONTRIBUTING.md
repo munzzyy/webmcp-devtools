@@ -17,7 +17,7 @@ Nothing to install. It's plain JavaScript with no dependencies, and the tests us
 node --test
 ```
 
-That covers the pure modules in `core/`, the security linter in `lint.js`, and a structural check on `manifest.json`. It does not cover the rendered panel — that needs a real Chrome window (`chrome.devtools.*` can't run in Node). Load the extension unpacked and open `examples/demo.html` to check panel behavior by hand.
+That covers the pure modules in `core/`, the security linter in `lint.js`, structural checks on `manifest.json`, and the real `panel.js`, `content.js`, and `page-bridge.js` driven against fakes (`tests/panelHarness.js` and `tests/worldHarness.js` fake exactly the DOM and `chrome.*` surface those files touch). `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` additionally drives the real extension in headless Chromium. For anything touching the panel's rendering or the background relay, also load the extension unpacked and open `examples/demo.html` to check it by hand.
 
 ## Adding to the linter
 
