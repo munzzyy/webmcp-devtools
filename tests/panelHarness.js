@@ -10,7 +10,7 @@
 // setAttribute, hidden, value, classList.add, createElement/createTextNode).
 
 const PANEL_IDS = [
-  'app', 'status-bar', 'tools-section', 'tools-toolbar', 'refresh-btn', 'tools-count',
+  'app', 'status-bar', 'tools-section', 'tools-toolbar', 'refresh-btn', 'copy-findings-btn', 'tools-count',
   'tools-table', 'tools-tbody', 'detail-section', 'detail-name', 'detail-description',
   'detail-schema', 'detail-findings', 'execute-form', 'execute-args', 'execute-error',
   'execute-result', 'timeline-section', 'timeline-toolbar', 'clear-timeline-btn', 'timeline-list',
@@ -131,8 +131,25 @@ export async function loadPanel() {
     runtime: { connect: () => makePort() },
   };
 
+  // A minimal navigator.clipboard fake. clipboardFails lets a test flip the
+  // write into a rejection to cover the "copy failed" path without a real
+  // clipboard permission model.
+  const clipboardWrites = [];
+  const navigator = {
+    clipboard: {
+      writeText: (text) => {
+        clipboardWrites.push(text);
+        return navigator._clipboardFails ? Promise.reject(new Error('denied')) : Promise.resolve();
+      },
+    },
+    _clipboardFails: false,
+  };
+
   globalThis.document = document;
   globalThis.chrome = chrome;
+  // Node's own globalThis.navigator is a getter-only accessor, so a plain
+  // assignment throws; redefine it instead.
+  Object.defineProperty(globalThis, 'navigator', { value: navigator, configurable: true });
 
   // Cache-bust so each test re-evaluates panel.js's module-level state.
   await import(`../panel.js?h=${loadPanel.counter++}`);
@@ -145,6 +162,8 @@ export async function loadPanel() {
     el: (id) => byId.get(id),
     text: (id) => byId.get(id).textContent,
     rows: () => byId.get('tools-tbody').children,
+    clipboardWrites,
+    setClipboardFails: (fails) => { navigator._clipboardFails = fails; },
   };
 }
 loadPanel.counter = 0;

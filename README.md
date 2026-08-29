@@ -15,6 +15,7 @@ Plain JavaScript. No build step, no bundler, no framework, no runtime dependenci
 - Security diagnostics per tool. Every registered tool is linted for prompt injection and hidden Unicode in its name, description, and input schema (including per-property descriptions, where a payload hides best), arbitrary code execution, data-collection endpoints, hardcoded secrets, over-broad free-text parameters, and read/readonly mismatches. Findings are colored by severity, worst first, with a worst-severity badge in the tool table.
 - Mid-session change detection. Each tool announcement is diffed against the previous one: added and removed tools land in the timeline by name, and a tool whose description, `readOnlyHint`, or `inputSchema` changed after registration gets a high-severity finding. Re-framing an already-reviewed tool is the move a static scan can never catch; a live panel can.
 - A call-history timeline: calls executed from this panel, page-initiated `executeTool` calls observed through the bridge's wrappers, and every `toolchange` event with its diff, newest first. See the honest limits below.
+- Copy findings as JSON. A toolbar button serializes the current tool table (name, origin, annotations, findings) to the clipboard, so you can file a bug or hand a page's audit results to a teammate without retyping them.
 - Polyfill-aware detection. A MAIN-world bridge script reads `document.modelContext` in the page's own world, so the panel sees it whether it came from Chrome's native flagged build or a page-loaded polyfill like `@mcp-b/webmcp-polyfill`. Pages still registering tools on the deprecated `navigator.modelContext` surface get flagged as such.
 
 ### What the timeline can and cannot see
@@ -32,6 +33,8 @@ The bridge wraps `executeTool` and the `execute` handler of every tool registere
 - Hardcoded secrets: AWS, GitHub, OpenAI, Anthropic, Slack, and Google key formats in tool metadata.
 - Over-broad parameters: a free-form `command`, `code`, `path`, `url`, or `sql` string with no enum, format, or length limit.
 - Annotation mismatches: a `getBalance`-style name that isn't marked `readOnlyHint`, and tools flagged with `untrustedContentHint` whose output should be treated as data.
+- Missing untrusted-content hints: a tool that reads as fetching a page, scraping, or handling third-party content but doesn't set `annotations.untrustedContentHint`, so its output would otherwise be treated as trusted instructions instead of data.
+- Chrome's published size budgets: a name over 30 characters, a tool description over 500, or a parameter description over 150. Content past the budget can be truncated before the agent ever reads it.
 
 Every string a page provides is treated as hostile. Findings render as text only, never as markup.
 

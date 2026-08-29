@@ -264,3 +264,40 @@ test('a toolchange rerender no longer wipes the last execute result', async () =
   });
   assert.ok(p.text('execute-result').includes('68'), 'result pane must survive a no-op re-announcement');
 });
+
+test('copy findings as JSON copies the current tool/finding data to the clipboard', async () => {
+  const p = await loadPanel();
+  p.emit({
+    type: 'tools', frameId: 0, origin: 'https://x', hasModelContext: true,
+    tools: [tool('t1', 'runShellCommand', 'Runs an arbitrary shell command.')],
+  });
+
+  p.el('copy-findings-btn').dispatch('click');
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(p.clipboardWrites.length, 1);
+  const payload = JSON.parse(p.clipboardWrites[0]);
+  assert.equal(payload.length, 1);
+  assert.equal(payload[0].name, 'runShellCommand');
+  assert.equal(payload[0].origin, 'https://x');
+  assert.ok(payload[0].findings.some((f) => f.id === 'capability'), JSON.stringify(payload));
+});
+
+test('copy findings shows a transient failure state if the clipboard write rejects', async () => {
+  const p = await loadPanel();
+  p.emit({
+    type: 'tools', frameId: 0, origin: 'https://x', hasModelContext: true,
+    tools: [tool('t1', 'getWeather', 'Weather.')],
+  });
+  p.setClipboardFails(true);
+
+  const btn = p.el('copy-findings-btn');
+  const original = btn.textContent;
+  btn.dispatch('click');
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(btn.textContent, 'Copy failed');
+  assert.notEqual(original, 'Copy failed');
+});

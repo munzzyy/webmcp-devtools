@@ -100,6 +100,10 @@ document.getElementById('clear-timeline-btn').addEventListener('click', () => {
   renderTimeline();
 });
 
+document.getElementById('copy-findings-btn').addEventListener('click', () => {
+  copyFindingsToClipboard();
+});
+
 document.getElementById('execute-form').addEventListener('submit', (event) => {
   event.preventDefault();
   if (!selectedToolKey) return;
@@ -510,6 +514,33 @@ function findingsFor(frameId, tool) {
         'Re-read the current definition before trusting or executing it.',
     },
   ];
+}
+
+// Serializes the same tool/finding data the table renders and copies it as
+// JSON, so a user auditing a page can file a bug or hand it to a teammate
+// without retyping findings by hand -- the CLI sibling has --json for the
+// same reason.
+function copyFindingsToClipboard() {
+  const payload = flattenTools().map(({ frameId, tool }) => ({
+    frameId,
+    name: tool.name,
+    origin: (toolsByFrame.get(frameId) || {}).origin || '',
+    annotations: tool.annotations,
+    findings: findingsFor(frameId, tool),
+  }));
+  const json = JSON.stringify(payload, null, 2);
+  const btn = document.getElementById('copy-findings-btn');
+  const original = btn.textContent;
+  navigator.clipboard.writeText(json).then(
+    () => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    },
+    () => {
+      btn.textContent = 'Copy failed';
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    },
+  );
 }
 
 function renderToolsTable() {
