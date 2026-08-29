@@ -59,6 +59,13 @@ const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z
 // Parameter names that are dangerous when free-form (arbitrary payload passthrough).
 const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|filepath|file|url|uri|endpoint|host|redirect|callback|prompt|template|html|payload)$/i;
 
+// Phrasing that reads as "this tool hands back content from outside the
+// page" -- a fetched page, scraped text, another user's content -- which is
+// exactly the case webmcp-lint's WML-002 flags when untrustedContentHint is
+// not set. Mirrors that rule's keyword list so a manifest gets the same
+// verdict here as from the CLI.
+const UNTRUSTED_CONTENT_TEXT = /\b(?:returns?\s+(?:raw\s+)?html|user[\s-]generated\s+content|user\s+content|third[\s-]party\s+content|scrapes?|crawls?|fetch(?:es|ing|ed)?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|site|content)|reads?\s+(?:a\s+|the\s+)?(?:web\s?page|page|website|url)|retrieves?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|content)|downloads?\s+(?:a\s+|the\s+)?(?:file|page|content|url)|parses?\s+html|external\s+(?:content|data|website|page)|search(?:es)?\s+the\s+web|queries?\s+(?:a\s+|the\s+)?(?:web|internet|search\s+engine))\b/i;
+
 // Invisible / deceptive Unicode. `path` narrows the finding to an exact spot
 // inside a larger field (e.g. a schema property description); the title keeps
 // the coarse field name so repeats of one payload dedupe to a single finding.
@@ -247,6 +254,10 @@ export function lintTool(tool) {
   // everything else: it flows into the injection loop, the code-point scan,
   // and the word splitter, all of which are linear-or-worse in its length.
   const MAX_SCAN = 16384;
+  // Chrome's published per-field size budgets (see the budget findings below).
+  const NAME_BUDGET = 30;
+  const DESCRIPTION_BUDGET = 500;
+  const PARAM_DESCRIPTION_BUDGET = 150;
   const { json: schemaJson, unserializable, reason: unserializableReason } = safeSchemaJson(schema);
   const nameScan = name.length > MAX_SCAN ? name.slice(0, MAX_SCAN) : name;
   const descScan = description.length > MAX_SCAN ? description.slice(0, MAX_SCAN) : description;
@@ -359,6 +370,16 @@ export function lintTool(tool) {
       `"${nameDisplay}" reads like a lookup but readOnlyHint is not set. If it does mutate state the name is misleading; if it does not, set readOnlyHint so agents can treat it safely.`));
   }
 
+  // A tool that reads as pulling in content from outside the page (a fetched
+  // page, scraped text, another user's content) should mark
+  // untrustedContentHint so callers treat the result as data, not directives.
+  // Whatever it returns can carry its own injected instructions.
+  const untrustedContentMatch = UNTRUSTED_CONTENT_TEXT.exec(descScan) || UNTRUSTED_CONTENT_TEXT.exec(nameScan);
+  if (untrustedContentMatch && annotations.untrustedContentHint !== true) {
+    findings.push(finding('untrusted-missing', 'medium', 'Handles external content without untrustedContentHint',
+      `"${nameDisplay}" reads as handling outside content ("${untrustedContentMatch[0]}") but annotations.untrustedContentHint is not true. Whatever it returns can carry its own instructions aimed at the agent.`));
+  }
+
   if (annotations.untrustedContentHint === true) {
     findings.push(finding('untrusted', 'info', 'Tool returns untrusted content',
       'This tool is flagged as returning untrusted content. Whatever it returns can contain injection aimed at the agent, so treat its output as data, not instructions.'));
@@ -375,6 +396,35 @@ export function lintTool(tool) {
     findings.push(finding('truncated', 'low', 'Oversized tool metadata (scanned first 16 KB)',
       'The name, description, or schema is larger than 16 KB (or the schema nests deeper than the scan limit), so only part of it was scanned for injection and exfiltration patterns. Oversized tool metadata is itself unusual for a legitimate tool.'));
   }
+
+  // Chrome's published WebMCP size budgets: 30 chars for a tool or parameter
+  // name, 500 for a tool description, 150 for a parameter description. These
+  // are style findings, not security ones -- but content past the budget can
+  // be cut before the agent ever sees it, so a reviewer reading the full text
+  // is reviewing something the agent may never act on in that form.
+  if (name.length > NAME_BUDGET) {
+    findings.push(finding('budget-name', 'low', 'Tool name is over the 30-character budget',
+      `"${nameDisplay}" has a ${name.length}-character name, over Chrome's ${NAME_BUDGET}-character budget for a tool name.`));
+  }
+  if (description.length > DESCRIPTION_BUDGET) {
+    findings.push(finding('budget-description', 'medium', 'Tool description is over the 500-character budget',
+      `"${nameDisplay}" has a ${description.length}-character description, over Chrome's ${DESCRIPTION_BUDGET}-character budget. Anything past the budget can be cut before the agent reads it.`));
+  }
+  const paramBudgetFindings = [];
+  for (const { path, text } of schemaStrings) {
+    if (path.endsWith('(property name)')) {
+      if (text.length > NAME_BUDGET) {
+        paramBudgetFindings.push(finding('budget-param-name', 'low', 'Parameter name is over the 30-character budget',
+          `"${text}" is a ${text.length}-character parameter name, over Chrome's ${NAME_BUDGET}-character budget.`));
+      }
+    } else if (path.endsWith('.description')) {
+      if (text.length > PARAM_DESCRIPTION_BUDGET) {
+        paramBudgetFindings.push(finding('budget-param-description', 'medium', 'Parameter description is over the 150-character budget',
+          `The description at ${path} is ${text.length} characters, over Chrome's ${PARAM_DESCRIPTION_BUDGET}-character budget for a parameter description. Anything past the budget can be cut before the agent reads it.`));
+      }
+    }
+  }
+  findings.push(...dedupeByTitle(paramBudgetFindings));
 
   return findings;
 }

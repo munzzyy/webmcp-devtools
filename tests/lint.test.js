@@ -425,6 +425,109 @@ test('a multi-megabyte name lints in bounded time and reports truncation', () =>
   assert.ok(f.some((x) => x.id === 'truncated'), JSON.stringify(f.map((x) => x.id)));
 });
 
+// --- WML-002 parity: a tool that reads as handling outside content needs
+// untrustedContentHint set, same as webmcp-lint's CLI rule. ---
+test('a tool that fetches a web page without untrustedContentHint is flagged medium', () => {
+  const f = lintTool(normalizeTool({
+    name: 'summarizePage',
+    description: 'Fetches a web page and returns a summary of its content.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'untrusted-missing' && x.severity === 'medium'), JSON.stringify(f));
+});
+
+test('a tool that fetches a web page WITH untrustedContentHint is not flagged', () => {
+  const f = lintTool(normalizeTool({
+    name: 'summarizePage',
+    description: 'Fetches a web page and returns a summary of its content.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true, untrustedContentHint: true },
+  }));
+  assert.equal(f.filter((x) => x.id === 'untrusted-missing').length, 0, JSON.stringify(f));
+});
+
+test('a tool that scrapes user-generated content without the hint is flagged', () => {
+  const f = lintTool(normalizeTool({
+    name: 'getComments',
+    description: 'Scrapes user-generated content from the page.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'untrusted-missing'), JSON.stringify(f));
+});
+
+test('an unrelated tool is not flagged for untrusted content', () => {
+  const f = lintTool(normalizeTool({
+    name: 'addTwoNumbers',
+    description: 'Adds two numbers and returns the sum.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.equal(f.filter((x) => x.id === 'untrusted-missing').length, 0, JSON.stringify(f));
+});
+
+// --- WML-009 parity: Chrome's per-field size budgets, reported per field
+// like the CLI instead of one generic oversized-metadata warning. ---
+test('a tool name over 30 characters is flagged low', () => {
+  const f = lintTool(normalizeTool({
+    name: 'aVeryLongToolNameThatBlowsThePublishedBudget',
+    description: 'Does a thing.',
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'budget-name' && x.severity === 'low'), JSON.stringify(f));
+});
+
+test('a tool description over 500 characters is flagged medium', () => {
+  const f = lintTool(normalizeTool({
+    name: 'helper',
+    description: 'a'.repeat(501),
+    inputSchema: '{}',
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'budget-description' && x.severity === 'medium'), JSON.stringify(f));
+});
+
+test('a parameter name over 30 characters is flagged low', () => {
+  const f = lintTool(normalizeTool({
+    name: 'helper',
+    description: 'Does a thing.',
+    inputSchema: JSON.stringify({
+      type: 'object',
+      properties: { thisParameterNameIsWayTooLongForTheBudget: { type: 'string', maxLength: 10 } },
+    }),
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'budget-param-name' && x.severity === 'low'), JSON.stringify(f));
+});
+
+test('a parameter description over 150 characters is flagged medium', () => {
+  const f = lintTool(normalizeTool({
+    name: 'helper',
+    description: 'Does a thing.',
+    inputSchema: JSON.stringify({
+      type: 'object',
+      properties: { note: { type: 'string', maxLength: 500, description: 'a'.repeat(151) } },
+    }),
+    annotations: { readOnlyHint: true },
+  }));
+  assert.ok(f.some((x) => x.id === 'budget-param-description' && x.severity === 'medium'), JSON.stringify(f));
+});
+
+test('fields within budget are not flagged', () => {
+  const f = lintTool(normalizeTool({
+    name: 'getBalance',
+    description: 'Returns the account balance.',
+    inputSchema: JSON.stringify({
+      type: 'object',
+      properties: { accountId: { type: 'string', maxLength: 40, description: 'The account to look up.' } },
+    }),
+    annotations: { readOnlyHint: true },
+  }));
+  assert.equal(f.filter((x) => x.id.startsWith('budget-')).length, 0, JSON.stringify(f));
+});
+
 test('an invisible U+2063 separator is flagged, a leading BOM is not', () => {
   const withSep = lintTool(normalizeTool({
     name: 'h',
