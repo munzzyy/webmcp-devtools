@@ -1,7 +1,7 @@
 # webmcp-devtools
 
 [![CI](https://github.com/munzzyy/webmcp-devtools/actions/workflows/ci.yml/badge.svg)](https://github.com/munzzyy/webmcp-devtools/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 A browser DevTools panel that inspects the [WebMCP](https://github.com/webmachinelearning/webmcp) tools a web page exposes to AI agents, and lints them for security problems. It shows a live tool table, a call-history timeline, and per-tool diagnostics, as a real DevTools tab next to Elements and Console.
 
@@ -140,7 +140,9 @@ What the fakes cannot prove is that a MAIN-world script really sees a page-insta
 
 ## License
 
-MIT. Free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
+[GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy
+or a modified version, it has to stay under the GPL and come with its source. Releases up to
+v0.2.0 were under MIT.
 
 ## Support
 
