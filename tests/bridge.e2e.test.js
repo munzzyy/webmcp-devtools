@@ -141,11 +141,22 @@ function serveFixtures() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Per request, so a Chrome that stops answering fails the test instead of hanging it.
+const CDP_TIMEOUT_MS = 10000;
+
 function connectDevTools(wsUrl) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const pending = new Map();
     let nextId = 0;
+    const failAll = (err) => {
+      for (const waiter of pending.values()) waiter.reject(err);
+      pending.clear();
+    };
+    const openTimer = setTimeout(() => {
+      reject(new Error('DevTools WebSocket never opened'));
+      ws.close();
+    }, CDP_TIMEOUT_MS);
     ws.addEventListener('message', (event) => {
       const msg = JSON.parse(event.data);
       const waiter = msg.id !== undefined ? pending.get(msg.id) : undefined;
@@ -154,19 +165,64 @@ function connectDevTools(wsUrl) {
       if (msg.error) waiter.reject(new Error(msg.error.message));
       else waiter.resolve(msg.result);
     });
-    ws.addEventListener('error', () => reject(new Error('DevTools WebSocket failed')));
-    ws.addEventListener('open', () => resolve({
-      send(method, params = {}) {
-        nextId += 1;
-        const id = nextId;
-        return new Promise((res, rej) => {
-          pending.set(id, { resolve: res, reject: rej });
-          ws.send(JSON.stringify({ id, method, params }));
-        });
-      },
-      close: () => ws.close(),
-    }));
+    ws.addEventListener('error', () => {
+      clearTimeout(openTimer);
+      reject(new Error('DevTools WebSocket failed'));
+      failAll(new Error('DevTools WebSocket failed'));
+    });
+    ws.addEventListener('close', () => failAll(new Error('DevTools WebSocket closed')));
+    ws.addEventListener('open', () => {
+      clearTimeout(openTimer);
+      resolve({
+        send(method, params = {}) {
+          nextId += 1;
+          const id = nextId;
+          return new Promise((res, rej) => {
+            const timer = setTimeout(() => {
+              pending.delete(id);
+              rej(new Error(`${method} got no answer in ${CDP_TIMEOUT_MS} ms`));
+            }, CDP_TIMEOUT_MS);
+            pending.set(id, {
+              resolve: (value) => { clearTimeout(timer); res(value); },
+              reject: (err) => { clearTimeout(timer); rej(err); },
+            });
+            ws.send(JSON.stringify({ id, method, params }));
+          });
+        },
+        close: () => ws.close(),
+      });
+    });
   });
+}
+
+function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+// Killing only the main process leaves renderers writing into the profile while it is deleted.
+async function stopChrome(child, exited) {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (err) {
+    // ESRCH: the whole group is already gone
+  }
+  await exited;
+  const until = Date.now() + 5000;
+  while (groupAlive(child.pid) && Date.now() < until) await sleep(50);
+}
+
+function removeQuietly(t, dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (err) {
+    t.diagnostic(`left ${dir} behind: ${err.message}`);
+  }
 }
 
 // Returns the page's HTML once settled(html) holds, or whatever it has at the deadline.
@@ -184,8 +240,11 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
     '--disable-features=WebMCP',
     '--remote-debugging-port=0',
     'about:blank',
-  ], { stdio: 'ignore' });
-  const exited = new Promise((resolve) => child.once('exit', resolve));
+  ], { stdio: 'ignore', detached: true });
+  const exited = new Promise((resolve) => {
+    child.once('exit', resolve);
+    child.once('error', resolve);
+  });
   try {
     const portFile = path.join(profile, 'DevToolsActivePort');
     while (!existsSync(portFile)) {
@@ -194,11 +253,13 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
       await sleep(100);
     }
     let devtoolsPort = '';
-    while (!devtoolsPort && Date.now() < deadline) {
+    while (!devtoolsPort) {
+      if (Date.now() > deadline) throw new Error('DevToolsActivePort never got a port');
       devtoolsPort = readFileSync(portFile, 'utf8').split('\n')[0].trim();
       if (!devtoolsPort) await sleep(50);
     }
-    const targets = await (await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`)).json();
+    const listing = await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`, { signal: AbortSignal.timeout(CDP_TIMEOUT_MS) });
+    const targets = await listing.json();
     const page = targets.find((target) => target.type === 'page');
     if (!page) throw new Error('no page target to drive');
     const devtools = await connectDevTools(page.webSocketDebuggerUrl);
@@ -216,8 +277,7 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
       devtools.close();
     }
   } finally {
-    if (child.exitCode === null) child.kill('SIGKILL');
-    await exited;
+    await stopChrome(child, exited);
   }
 }
 
@@ -275,6 +335,6 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);
   } finally {
     server.close();
-    rmSync(tmp, { recursive: true, force: true });
+    removeQuietly(t, tmp);
   }
 });
