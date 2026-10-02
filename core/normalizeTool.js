@@ -18,6 +18,7 @@ const EMPTY_SCHEMA = Object.freeze({ type: 'object', properties: {} });
  * @returns {{
  *   toolId: string | null,
  *   name: string,
+ *   title: string,
  *   description: string,
  *   inputSchema: object,
  *   inputSchemaError: string | null,
@@ -35,6 +36,7 @@ export function normalizeTool(raw) {
   // by name. Null when a caller (e.g. a unit test) provides no id.
   const toolId = typeof src.toolId === 'string' ? src.toolId : null;
   const name = typeof src.name === 'string' && src.name.length > 0 ? src.name : '(unnamed tool)';
+  const title = typeof src.title === 'string' ? src.title : '';
   const description = typeof src.description === 'string' ? src.description : '';
   const origin = typeof src.origin === 'string' ? src.origin : '';
 
@@ -43,7 +45,7 @@ export function normalizeTool(raw) {
 
   const degraded = normalizeDegraded(src.degraded);
 
-  return { toolId, name, description, inputSchema, inputSchemaError, annotations, origin, degraded };
+  return { toolId, name, title, description, inputSchema, inputSchemaError, annotations, origin, degraded };
 }
 
 // page-bridge.js lists the fields it had to replace with a lossy copy (a

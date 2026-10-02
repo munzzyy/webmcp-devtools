@@ -120,6 +120,11 @@ section {
   max-height: 35vh;
 }
 
+#detail-title {
+  margin: 0 0 4px;
+  color: var(--fg-muted);
+}
+
 #timeline-section {
   flex: 1 1 auto;
   min-height: 0;

@@ -618,6 +618,9 @@ function renderDetail() {
 
   section.hidden = false;
   document.getElementById('detail-name').textContent = tool.name;
+  const titleEl = document.getElementById('detail-title');
+  titleEl.textContent = tool.title ? `Title: ${tool.title}` : '';
+  titleEl.hidden = !tool.title;
   document.getElementById('detail-description').textContent = tool.description || '(no description)';
 
   const schemaText =

@@ -301,3 +301,20 @@ test('copy findings shows a transient failure state if the clipboard write rejec
   assert.equal(btn.textContent, 'Copy failed');
   assert.notEqual(original, 'Copy failed');
 });
+
+test('the detail pane shows a tool title as text when there is one', async () => {
+  const p = await loadPanel();
+  p.emit({
+    type: 'tools', frameId: 0, origin: 'https://x', hasModelContext: true,
+    tools: [
+      { ...tool('t1', 'getWeather', 'Weather.'), title: '<img src=x onerror=alert(1)>' },
+      tool('t2', 'addTodo', 'Todos.'),
+    ],
+  });
+  p.rows()[1].dispatch('click');
+  assert.equal(p.el('detail-title').hidden, false);
+  assert.equal(p.text('detail-title'), 'Title: <img src=x onerror=alert(1)>');
+  p.rows()[0].dispatch('click');
+  assert.equal(p.el('detail-title').hidden, true);
+  assert.equal(p.text('detail-title'), '');
+});

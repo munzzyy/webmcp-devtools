@@ -63,6 +63,12 @@ test('the bridge consumes the nonce attribute so the page can never read it', as
   assert.ok(b.ofType('bridge-ready').length === 1);
 });
 
+test('the projection relays a tool title, which native tools carry', async () => {
+  const b = loadBridge({ modelContext: specModelContext([tool('getWeather', { title: 'Weather lookup' })]) });
+  await b.flush();
+  assert.equal(b.ofType('tools').pop().tools[0].title, 'Weather lookup');
+});
+
 test('a page-installed modelContext is detected and its tools announced', async () => {
   const b = loadBridge({ modelContext: specModelContext([tool('getWeather'), tool('addTodo')]) });
   await b.flush();

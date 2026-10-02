@@ -114,3 +114,9 @@ test('normalizeTool keeps only known field names from the bridge degraded list',
   assert.deepEqual(normalizeTool({ name: 'x' }).degraded, []);
   assert.deepEqual(normalizeTool({ name: 'x', degraded: 'inputSchema' }).degraded, []);
 });
+
+test('normalizeTool keeps a string title and defaults anything else to empty', () => {
+  assert.equal(normalizeTool({ name: 'x', title: 'Add a note' }).title, 'Add a note');
+  assert.equal(normalizeTool({ name: 'x' }).title, '');
+  assert.equal(normalizeTool({ name: 'x', title: 5 }).title, '');
+});

@@ -188,6 +188,7 @@
       toolId,
       via,
       name: field('name'),
+      title: field('title'),
       description: field('description'),
       inputSchema: field('inputSchema'),
       annotations: field('annotations'),

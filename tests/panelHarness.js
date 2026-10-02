@@ -11,7 +11,7 @@
 
 const PANEL_IDS = [
   'app', 'status-bar', 'tools-section', 'tools-toolbar', 'refresh-btn', 'copy-findings-btn', 'tools-count',
-  'tools-table', 'tools-tbody', 'detail-section', 'detail-name', 'detail-description',
+  'tools-table', 'tools-tbody', 'detail-section', 'detail-name', 'detail-title', 'detail-description',
   'detail-schema', 'detail-findings', 'execute-form', 'execute-args', 'execute-error',
   'execute-result', 'timeline-section', 'timeline-toolbar', 'clear-timeline-btn', 'timeline-list',
 ];

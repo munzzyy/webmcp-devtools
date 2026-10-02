@@ -11,7 +11,7 @@
 //   lintTool(tool) -> Array<{ id, severity, title, detail }>
 //   severity is one of 'critical' | 'high' | 'medium' | 'low' | 'info'
 //   tool is the output of core/normalizeTool.js:
-//     { name, description, inputSchema (object), inputSchemaError, annotations, origin, degraded }
+//     { name, title, description, inputSchema (object), inputSchemaError, annotations, origin, degraded }
 //
 // Pure: no chrome.* and no DOM. Unit-tested with node --test.
 
@@ -159,23 +159,26 @@ function serializeLossy(value, ancestors, depth) {
   return out;
 }
 
-// Keys whose string values are read by the agent as part of the tool
-// definition. MCP clients feed schema `description`/`title` text into the
-// prompt exactly like the top-level description, which makes them the most
-// obvious place to hide an injection that a description-only scan misses.
-const SCHEMA_TEXT_KEYS = new Set(['description', 'title', 'const']);
+// Every string in the schema reaches the agent as part of the tool
+// definition: descriptions and titles, but also defaults, examples,
+// $comment, and vendor x-* keys. A walk that only reads description/title
+// leaves all of those as clean hiding places. Strings under default,
+// examples, const and enum are data the page supplies, so they are scanned
+// like everything else but never count toward the description size budget.
+const SCHEMA_DATA_KEYS = new Set(['default', 'examples', 'const', 'enum']);
 const MAX_SCHEMA_DEPTH = 12;
 
-// Walks the schema and collects every agent-readable string with the path it
-// was found at: property names, and description/title/const/enum string
-// values. Bounded by depth and by a shared character budget so a hostile
-// schema cannot turn the walk itself into the DoS.
+// Walks the schema and collects every string with the path it was found at
+// and a kind: 'name' for a property name, 'key' for any other object key,
+// 'description' for a schema description, 'value' for everything else.
+// Bounded by depth and by a shared character budget so a hostile schema
+// cannot turn the walk itself into the DoS.
 function collectSchemaStrings(schema, budgetChars) {
   const out = [];
   let budget = budgetChars;
   let truncated = false;
 
-  const take = (path, text) => {
+  const take = (path, text, kind) => {
     if (budget <= 0) {
       truncated = true;
       return;
@@ -186,10 +189,14 @@ function collectSchemaStrings(schema, budgetChars) {
       truncated = true;
     }
     budget -= clipped.length;
-    out.push({ path, text: clipped });
+    out.push({ path, text: clipped, kind });
   };
 
-  const visit = (node, path, ancestors, depth) => {
+  const visit = (node, path, ancestors, depth, inData) => {
+    if (typeof node === 'string') {
+      take(path, node, 'value');
+      return;
+    }
     if (!node || typeof node !== 'object') return;
     if (depth > MAX_SCHEMA_DEPTH) {
       truncated = true;
@@ -204,13 +211,15 @@ function collectSchemaStrings(schema, budgetChars) {
       ancestors.pop();
       return;
     }
+    const isArray = Array.isArray(node);
     for (const [key, value] of entries) {
       if (budget <= 0) {
         truncated = true;
         break;
       }
-      const childPath = `${path}.${key}`;
-      if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
+      const childPath = isArray ? `${path}[${key}]` : `${path}.${key}`;
+      if (!isArray) take(`${childPath} (key)`, key, 'key');
+      if (!inData && key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
         let propEntries;
         try {
           propEntries = Object.entries(value);
@@ -218,29 +227,27 @@ function collectSchemaStrings(schema, budgetChars) {
           continue;
         }
         for (const [propName, spec] of propEntries) {
-          take(`${path}.properties (property name)`, propName);
-          visit(spec, `${childPath}.${propName}`, ancestors, depth + 1);
+          if (budget <= 0) break;
+          take(`${path}.properties (property name)`, propName, 'name');
+          visit(spec, `${childPath}.${propName}`, ancestors, depth + 1, false);
         }
-      } else if (typeof value === 'string' && SCHEMA_TEXT_KEYS.has(key)) {
-        take(childPath, value);
-      } else if (key === 'enum' && Array.isArray(value)) {
-        for (let i = 0; i < value.length; i += 1) {
-          if (typeof value[i] === 'string') take(`${childPath}[${i}]`, value[i]);
-        }
+      } else if (typeof value === 'string') {
+        take(childPath, value, !inData && !isArray && key === 'description' ? 'description' : 'value');
       } else if (value && typeof value === 'object') {
-        visit(value, childPath, ancestors, depth + 1);
+        visit(value, childPath, ancestors, depth + 1, inData || (!isArray && SCHEMA_DATA_KEYS.has(key)));
       }
     }
     ancestors.pop();
   };
 
-  visit(schema, 'inputSchema', [], 0);
+  visit(schema, 'inputSchema', [], 0, false);
   return { strings: out, truncated };
 }
 
 export function lintTool(tool) {
   const t = tool && typeof tool === 'object' ? tool : {};
   const name = typeof t.name === 'string' ? t.name : '';
+  const title = typeof t.title === 'string' ? t.title : '';
   const description = typeof t.description === 'string' ? t.description : '';
   const annotations = t.annotations && typeof t.annotations === 'object' ? t.annotations : {};
   const schema = t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : {};
@@ -260,6 +267,7 @@ export function lintTool(tool) {
   const PARAM_DESCRIPTION_BUDGET = 150;
   const { json: schemaJson, unserializable, reason: unserializableReason } = safeSchemaJson(schema);
   const nameScan = name.length > MAX_SCAN ? name.slice(0, MAX_SCAN) : name;
+  const titleScan = title.length > MAX_SCAN ? title.slice(0, MAX_SCAN) : title;
   const descScan = description.length > MAX_SCAN ? description.slice(0, MAX_SCAN) : description;
   const schemaScan = schemaJson.length > MAX_SCAN ? schemaJson.slice(0, MAX_SCAN) : schemaJson;
   const nameDisplay = name.length > 80 ? `${name.slice(0, 77)}...` : name;
@@ -275,9 +283,9 @@ export function lintTool(tool) {
       `The page put a value in this tool's ${fields} that cannot cross the extension's message channel (a BigInt, a circular reference, or a function). The panel received a lossy copy with those values replaced by markers, and everything here was linted from that copy. Values like these in tool metadata are a strong sign the page is trying to break inspection tooling.`));
   }
 
-  // Name and description are the strings the agent actually reads, so injection
-  // phrasing there lands directly in its context.
-  for (const [fieldName, value] of [['name', nameScan], ['description', descScan]]) {
+  // Name, title and description are the strings the agent actually reads, so
+  // injection phrasing there lands directly in its context.
+  for (const [fieldName, value] of [['name', nameScan], ['title', titleScan], ['description', descScan]]) {
     // NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
     // fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII,
     // so a phrase spelled in look-alike Unicode reads the same as the plain
@@ -301,11 +309,12 @@ export function lintTool(tool) {
   // Zero-width and bidi characters survive copy-paste but never render, which is
   // what makes them the classic carrier for hidden instructions.
   findings.push(...scanUnicode('name', nameScan));
+  findings.push(...scanUnicode('title', titleScan));
   findings.push(...scanUnicode('description', descScan));
 
-  // Schema description/title/const/enum strings and property names reach the
-  // agent verbatim as part of the tool definition, so they get the exact same
-  // injection and hidden-Unicode treatment as the top-level fields. Findings
+  // Every schema string and key reaches the agent verbatim as part of the
+  // tool definition, so it gets the exact same injection and hidden-Unicode
+  // treatment as the top-level fields. Findings
   // carry the path (e.g. inputSchema.properties.text.description); titles stay
   // coarse so one payload repeated across ten properties dedupes to one finding.
   const { strings: schemaStrings, truncated: schemaWalkTruncated } = collectSchemaStrings(schema, MAX_SCAN);
@@ -322,13 +331,13 @@ export function lintTool(tool) {
   }
   findings.push(...dedupeByTitle(schemaFindings));
 
-  const sinkHit = SINK.exec(descScan) || SINK.exec(schemaScan);
+  const sinkHit = SINK.exec(titleScan) || SINK.exec(descScan) || SINK.exec(schemaScan);
   if (sinkHit) {
     findings.push(finding('sink', 'high', 'References a data-collection endpoint',
       `Mentions "${sinkHit[0]}", a paste/webhook/tunnel endpoint whose purpose is receiving data out-of-band.`));
   }
 
-  if (SECRET.test(descScan) || SECRET.test(schemaScan)) {
+  if (SECRET.test(titleScan) || SECRET.test(descScan) || SECRET.test(schemaScan)) {
     findings.push(finding('secret', 'high', 'Possible hardcoded credential in tool metadata',
       'A credential-shaped string appears in the tool description or schema. Anything shipped in page source is exposed.'));
   }
@@ -398,7 +407,7 @@ export function lintTool(tool) {
     findings.push(finding('nodesc', 'low', 'Tool has no description',
       'A tool with no description gives the agent nothing to reason about and cannot be reviewed.'));
   }
-  if (name.length > MAX_SCAN || description.length > MAX_SCAN || schemaJson.length > MAX_SCAN || schemaWalkTruncated) {
+  if (name.length > MAX_SCAN || title.length > MAX_SCAN || description.length > MAX_SCAN || schemaJson.length > MAX_SCAN || schemaWalkTruncated) {
     findings.push(finding('truncated', 'low', 'Oversized tool metadata (scanned first 16 KB)',
       'The name, description, or schema is larger than 16 KB (or the schema nests deeper than the scan limit), so only part of it was scanned for injection and exfiltration patterns. Oversized tool metadata is itself unusual for a legitimate tool.'));
   }
@@ -417,13 +426,13 @@ export function lintTool(tool) {
       `"${nameDisplay}" has a ${description.length}-character description, over Chrome's ${DESCRIPTION_BUDGET}-character budget. Anything past the budget can be cut before the agent reads it.`));
   }
   const paramBudgetFindings = [];
-  for (const { path, text } of schemaStrings) {
-    if (path.endsWith('(property name)')) {
+  for (const { path, text, kind } of schemaStrings) {
+    if (kind === 'name') {
       if (text.length > NAME_BUDGET) {
         paramBudgetFindings.push(finding('budget-param-name', 'low', 'Parameter name is over the 30-character budget',
           `"${text}" is a ${text.length}-character parameter name, over Chrome's ${NAME_BUDGET}-character budget.`));
       }
-    } else if (path.endsWith('.description')) {
+    } else if (kind === 'description') {
       if (text.length > PARAM_DESCRIPTION_BUDGET) {
         paramBudgetFindings.push(finding('budget-param-description', 'medium', 'Parameter description is over the 150-character budget',
           `The description at ${path} is ${text.length} characters, over Chrome's ${PARAM_DESCRIPTION_BUDGET}-character budget for a parameter description. Anything past the budget can be cut before the agent reads it.`));

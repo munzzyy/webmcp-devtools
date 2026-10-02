@@ -24,9 +24,9 @@ The bridge wraps `executeTool` and the `execute` handler of every tool registere
 
 ## What it lints for
 
-`lint.js` reads each tool's normalized `{ name, description, inputSchema, annotations }` and reports:
+`lint.js` reads each tool's normalized `{ name, title, description, inputSchema, annotations }` and reports:
 
-- Prompt injection and tool poisoning: "ignore previous instructions", "do not tell the user", "reveal your system prompt", persona overrides, and act-without-consent directives in a tool's name, description, or anywhere in its input schema. Schema `description`/`title` strings reach the agent verbatim, exactly like the tool description, so the walk covers every string in the schema and each finding names the path it was found at (for example `inputSchema.properties.text.description`).
+- Prompt injection and tool poisoning: "ignore previous instructions", "do not tell the user", "reveal your system prompt", persona overrides, and act-without-consent directives in a tool's name, title, description, or anywhere in its input schema. Every string in the schema reaches the agent verbatim, exactly like the tool description: descriptions and titles, but also defaults, examples, `$comment` and vendor `x-` keys. So the walk covers every string and key in the schema, and each finding names the path it was found at (for example `inputSchema.properties.text.default`).
 - Hidden Unicode: bidirectional overrides (Trojan Source), invisible tag characters that smuggle instructions, zero-width characters, in the same fields.
 - Arbitrary execution: a tool that runs shell commands, code, or SQL is remote code execution the moment an injection lands.
 - Data-collection endpoints: paste, webhook, and tunnel domains (webhook.site, ngrok, Discord webhooks, and the rest) referenced in a tool.
@@ -120,7 +120,7 @@ The nonce is a message-integrity aid, not a hard boundary: once messages flow, a
 
 Because both scripts are declared `all_frames: true`, every frame of the inspected tab gets its own pair. `background.js` keys everything by `tabId` and `frameId` over long-lived `chrome.runtime.connect()` ports rather than `chrome.tabs.sendMessage`, because a port's `sender.tab.id` and `sender.frameId` are populated for free, so the relay never needs the `tabs` permission.
 
-Tool objects from `getTools()` can carry live references that don't survive cloning, so the bridge keeps the real objects in a local map keyed by their stable id and only ever sends a serializable projection (name, description, inputSchema, annotations, origin) outward. A field that can't survive the trip to the extension (a BigInt, a circular reference, a function) goes out as a copy with markers in place of the bad values, and the tool gets a finding saying so, so one hostile field can't hide the rest of the list. When the panel runs a tool, the bridge looks the live object back up and calls `executeTool` on it in the page's world, so the live handle never leaves its frame.
+Tool objects from `getTools()` can carry live references that don't survive cloning, so the bridge keeps the real objects in a local map keyed by their stable id and only ever sends a serializable projection (name, title, description, inputSchema, annotations, origin) outward. A field that can't survive the trip to the extension (a BigInt, a circular reference, a function) goes out as a copy with markers in place of the bad values, and the tool gets a finding saying so, so one hostile field can't hide the rest of the list. When the panel runs a tool, the bridge looks the live object back up and calls `executeTool` on it in the page's world, so the live handle never leaves its frame.
 
 ## Permissions
 
