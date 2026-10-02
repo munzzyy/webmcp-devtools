@@ -48,7 +48,18 @@
             return { items: ['apple', 'anvil'], limit: args && args.limit };
           },
         });
-        document.getElementById('status').textContent = 'modelContext installed, 1 tool registered';
+        // A BigInt survives structured clone but not the extension Port's
+        // JSON serialization, so the bridge has to degrade it on the way out.
+        document.modelContext.registerTool({
+          name: 'countItems',
+          description: 'Count the items in the demo inventory.',
+          inputSchema: { type: 'object', properties: { n: { type: 'integer', default: 1n } } },
+          annotations: { readOnlyHint: true },
+          async execute() {
+            return { count: 2 };
+          },
+        });
+        document.getElementById('status').textContent = 'modelContext installed, 2 tools registered';
 
         // Page-initiated call, after the bridge's 500ms detection poll has
         // had time to wrap executeTool: this is the "agent called a tool"

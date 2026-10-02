@@ -173,43 +173,83 @@
   // Strips non-cloneable/live fields and otherwise leaves the tool exactly as
   // the page provided it. Parsing/normalization happens in the panel via
   // core/normalizeTool.js so that logic stays in one pure, unit-tested place.
+  // Fields that had to be degraded are listed in `degraded`, so the panel can
+  // report the lossy copy instead of linting it as if it were the original.
   function projectTool(raw, toolId, via) {
     const src = raw && typeof raw === 'object' ? raw : {};
-    return {
+    const degraded = [];
+    const field = (key) => {
+      const value = src[key];
+      if (survivesPort(value)) return value;
+      degraded.push(key);
+      return lossyCopy(value, [], 0);
+    };
+    const projection = {
       toolId,
       via,
-      name: cloneSafe(src.name),
-      description: cloneSafe(src.description),
-      inputSchema: cloneSafe(src.inputSchema),
-      annotations: cloneSafe(src.annotations),
+      name: field('name'),
+      description: field('description'),
+      inputSchema: field('inputSchema'),
+      annotations: field('annotations'),
       origin: typeof src.origin === 'string' ? src.origin : safeOrigin(),
     };
+    if (degraded.length > 0) projection.degraded = degraded;
+    return projection;
   }
 
-  // postMessage structured-clones its payload, which supports cycles and
-  // BigInt but throws on functions/symbols/DOM nodes. Pass clean values
-  // through untouched; degrade anything else to a lossy JSON string the
-  // panel's normalizeTool already knows how to parse.
-  function cloneSafe(value) {
+  // A tools message crosses two hops. window.postMessage structured-clones
+  // it, which throws on functions, symbols and DOM nodes. The extension Port
+  // after it JSON-serializes, which throws "Could not serialize message." on
+  // a BigInt or a cycle, both of which structured clone accepts. A field that
+  // fails either hop would take the frame's whole tool list down with it.
+  function survivesPort(value) {
     try {
       structuredClone(value);
-      return value;
+      JSON.stringify(value);
+      return true;
     } catch (err) {
-      try {
-        const seen = new WeakSet();
-        return JSON.stringify(value, (key, v) => {
-          if (typeof v === 'bigint') return `${v}n`;
-          if (typeof v === 'function') return '[Function]';
-          if (v && typeof v === 'object') {
-            if (seen.has(v)) return '[Circular]';
-            seen.add(v);
-          }
-          return v;
-        });
-      } catch (err2) {
-        return '[unserializable value]';
-      }
+      return false;
     }
+  }
+
+  const MAX_COPY_DEPTH = 32;
+
+  // A plain-JSON copy that keeps the original shape so the panel can still
+  // show and lint it: BigInt becomes "123n", functions and symbols become
+  // markers, and a cycle back to an ancestor becomes "[Circular]".
+  function lossyCopy(value, ancestors, depth) {
+    const t = typeof value;
+    if (value === null || t === 'string' || t === 'boolean') return value;
+    if (t === 'number') return Number.isFinite(value) ? value : null;
+    if (t === 'bigint') return `${value}n`;
+    if (t === 'function') return '[Function]';
+    if (t === 'symbol') return '[Symbol]';
+    if (t !== 'object') return null;
+    if (depth >= MAX_COPY_DEPTH) return '[MaxDepth]';
+    if (ancestors.includes(value)) return '[Circular]';
+    ancestors.push(value);
+    let out;
+    try {
+      if (Array.isArray(value)) {
+        out = [];
+        for (let i = 0; i < value.length; i += 1) out.push(lossyCopy(value[i], ancestors, depth + 1));
+      } else {
+        out = {};
+        for (const key of Object.keys(value)) {
+          let child;
+          try {
+            child = value[key];
+          } catch (err) {
+            child = '[Unreadable]';
+          }
+          if (child !== undefined) out[key] = lossyCopy(child, ancestors, depth + 1);
+        }
+      }
+    } catch (err) {
+      out = '[Unreadable]';
+    }
+    ancestors.pop();
+    return out;
   }
 
   function ensureWrapped(mc) {

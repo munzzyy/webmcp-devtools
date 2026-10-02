@@ -140,7 +140,16 @@ export function loadContent() {
           disconnectHandlers: [],
           onMessage: { addListener(fn) { port.messageHandlers.push(fn); } },
           onDisconnect: { addListener(fn) { port.disconnectHandlers.push(fn); } },
-          postMessage(msg) { sent.push(msg); },
+          // A real Port JSON-serializes and throws this on a BigInt or a cycle
+          // (verified in Chromium 153), so the fake must refuse the same input.
+          postMessage(msg) {
+            try {
+              JSON.stringify(msg);
+            } catch (err) {
+              throw new Error('Could not serialize message.');
+            }
+            sent.push(msg);
+          },
           emit(msg) { for (const fn of port.messageHandlers) fn(msg); },
           disconnect() { for (const fn of port.disconnectHandlers) fn(); },
         };

@@ -9,6 +9,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadBridge } from './worldHarness.js';
+import { normalizeTool } from '../core/normalizeTool.js';
+import { lintTool } from '../lint.js';
 
 function specModelContext(initialTools = []) {
   const registry = new Map(); // name -> descriptor (live object, stable identity)
@@ -225,26 +227,68 @@ test('a registerTool-only build (no getTools) still enumerates observed registra
   assert.equal(tools.tools[0].via, 'registerTool');
 });
 
-test('a circular schema survives projection and the tools message still arrives', async () => {
-  const schema = { type: 'object', properties: { x: { type: 'string' } } };
-  schema.self = schema;
-  const mc = specModelContext([tool('looped', { inputSchema: schema })]);
+// A real extension Port JSON-serializes, so a BigInt or a cycle anywhere in a
+// tools message used to drop the whole list there. Each of these must come
+// out JSON-safe, still listing the tool, with the lossy field named.
+const unserializableTools = () => {
+  const looped = { type: 'object', properties: { x: { type: 'string' } } };
+  looped.self = looped;
+  return [
+    ['bigDefault', 'inputSchema', { inputSchema: { type: 'object', properties: { n: { type: 'integer', default: 1n } } } }],
+    ['bigAnnotation', 'annotations', { annotations: { readOnlyHint: true, weight: 2n } }],
+    ['bigDescription', 'description', { description: 10n }],
+    ['looped', 'inputSchema', { inputSchema: looped }],
+  ];
+};
+
+for (const [name, field, extra] of unserializableTools()) {
+  test(`a tool with an unserializable ${field} (${name}) is still listed, JSON-safe, with the field marked degraded`, async () => {
+    const mc = specModelContext([tool('getWeather'), tool(name, extra)]);
+    const b = loadBridge({ modelContext: mc });
+    await b.flush();
+    const msg = b.ofType('tools').pop();
+    assert.doesNotThrow(() => JSON.stringify(msg));
+    assert.deepEqual([...msg.tools.map((t) => t.name)].sort(), [name, 'getWeather'].sort());
+    const projected = msg.tools.find((t) => t.name === name);
+    assert.deepEqual([...projected.degraded], [field]);
+    assert.equal(msg.tools.find((t) => t.name === 'getWeather').degraded, undefined);
+
+    // The lossy copy is clean JSON, so the lint signal has to come from the
+    // degraded marker rather than from re-serializing the schema.
+    const findings = lintTool(normalizeTool(JSON.parse(JSON.stringify(projected))));
+    const hit = findings.find((f) => f.id === 'unserializable');
+    assert.ok(hit, JSON.stringify(findings));
+    assert.equal(hit.severity, 'medium');
+    assert.ok(hit.title.includes(field), hit.title);
+  });
+}
+
+test('a degraded field keeps its shape with markers in place of the bad values', async () => {
+  const [, , { inputSchema: looped }] = unserializableTools()[3];
+  const mc = specModelContext([
+    tool('bigDefault', { inputSchema: { type: 'object', properties: { n: { type: 'integer', default: 1n } } } }),
+    tool('looped', { inputSchema: looped }),
+    tool('bigAnnotation', { annotations: { readOnlyHint: true, weight: 2n } }),
+  ]);
   const b = loadBridge({ modelContext: mc });
   await b.flush();
-  const tools = b.ofType('tools').pop();
-  assert.equal(tools.tools.length, 1);
-  // structured clone supports cycles, so the schema passes through intact
-  assert.equal(tools.tools[0].inputSchema.self, tools.tools[0].inputSchema);
+  const byName = Object.fromEntries(b.ofType('tools').pop().tools.map((t) => [t.name, t]));
+  assert.equal(byName.bigDefault.inputSchema.properties.n.default, '1n');
+  assert.equal(byName.looped.inputSchema.self, '[Circular]');
+  assert.equal(byName.looped.inputSchema.properties.x.type, 'string');
+  assert.equal(byName.bigAnnotation.annotations.readOnlyHint, true);
+  assert.equal(byName.bigAnnotation.annotations.weight, '2n');
 });
 
-test('a schema carrying a function degrades to a lossy string instead of killing the message', async () => {
+test('a schema carrying a function degrades to a lossy copy instead of killing the message', async () => {
   const mc = specModelContext([tool('funky', { inputSchema: { type: 'object', evil: () => {} } })]);
   const b = loadBridge({ modelContext: mc });
   await b.flush();
   const tools = b.ofType('tools').pop();
   assert.equal(tools.tools.length, 1);
-  assert.equal(typeof tools.tools[0].inputSchema, 'string');
-  assert.ok(tools.tools[0].inputSchema.includes('[Function]'));
+  assert.equal(tools.tools[0].inputSchema.type, 'object');
+  assert.equal(tools.tools[0].inputSchema.evil, '[Function]');
+  assert.deepEqual([...tools.tools[0].degraded], ['inputSchema']);
 });
 
 test('the navigator-only legacy surface is reported distinctly', async () => {

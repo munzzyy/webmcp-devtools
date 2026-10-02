@@ -11,7 +11,7 @@
 //   lintTool(tool) -> Array<{ id, severity, title, detail }>
 //   severity is one of 'critical' | 'high' | 'medium' | 'low' | 'info'
 //   tool is the output of core/normalizeTool.js:
-//     { name, description, inputSchema (object), inputSchemaError, annotations, origin }
+//     { name, description, inputSchema (object), inputSchemaError, annotations, origin, degraded }
 //
 // Pure: no chrome.* and no DOM. Unit-tested with node --test.
 
@@ -267,6 +267,12 @@ export function lintTool(tool) {
   if (unserializable) {
     findings.push(finding('unserializable', 'medium', 'Input schema cannot be serialized',
       `JSON.stringify on this schema threw (${unserializableReason}). A circular reference or exotic value in a tool schema is a strong sign the page is trying to break inspection tooling; the schema was scanned in a degraded form.`));
+  }
+  const degraded = Array.isArray(t.degraded) ? t.degraded.filter((f) => typeof f === 'string') : [];
+  if (degraded.length > 0) {
+    const fields = degraded.join(', ');
+    findings.push(finding('unserializable', 'medium', `Tool metadata could not be relayed intact (${fields})`,
+      `The page put a value in this tool's ${fields} that cannot cross the extension's message channel (a BigInt, a circular reference, or a function). The panel received a lossy copy with those values replaced by markers, and everything here was linted from that copy. Values like these in tool metadata are a strong sign the page is trying to break inspection tooling.`));
   }
 
   // Name and description are the strings the agent actually reads, so injection

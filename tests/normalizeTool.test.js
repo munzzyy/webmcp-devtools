@@ -108,3 +108,9 @@ test('normalizeTool carries a stable toolId through when present, null otherwise
   assert.equal(normalizeTool({ toolId: '3', name: 't' }).toolId, '3');
   assert.equal(normalizeTool({ name: 't' }).toolId, null);
 });
+
+test('normalizeTool keeps only known field names from the bridge degraded list', () => {
+  assert.deepEqual(normalizeTool({ name: 'x', degraded: ['inputSchema', 'inputSchema', 'bogus', 5, 'annotations'] }).degraded, ['inputSchema', 'annotations']);
+  assert.deepEqual(normalizeTool({ name: 'x' }).degraded, []);
+  assert.deepEqual(normalizeTool({ name: 'x', degraded: 'inputSchema' }).degraded, []);
+});

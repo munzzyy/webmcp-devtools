@@ -61,10 +61,51 @@ const PROBE_JS = `window.addEventListener('message', (event) => {
 });
 `;
 
+// The window probe cannot see the last hop: content.js handing each message
+// to the extension Port, which JSON-serializes and throws on a BigInt or a
+// cycle. This one runs in the same isolated world BEFORE content.js, wraps
+// chrome.runtime.connect, and records every port.postMessage outcome in the
+// DOM. It rethrows, so content.js sees exactly what it would have seen.
+const PORT_PROBE_JS = `(() => {
+  const record = (text) => {
+    const el = document.createElement('div');
+    el.className = 'e2e-port-msg';
+    el.textContent = 'E2EPORT|' + text;
+    (document.body || document.documentElement).appendChild(el);
+  };
+  const connect = chrome.runtime.connect.bind(chrome.runtime);
+  chrome.runtime.connect = (...args) => {
+    const port = connect(...args);
+    const post = port.postMessage.bind(port);
+    port.postMessage = (msg) => {
+      try {
+        post(msg);
+      } catch (err) {
+        record('THROW:' + (err && err.message));
+        throw err;
+      }
+      let text = 'ok:' + String(msg && msg.type);
+      if (msg && msg.type === 'tools') {
+        text += ':' + (Array.isArray(msg.tools) ? msg.tools.map((t) => t && t.name).join(',') : '?');
+        if (msg.error) text += ':error=' + msg.error;
+      }
+      record(text);
+    };
+    return port;
+  };
+})();
+`;
+
 function buildHarnessExtension(tmp) {
   const ext = path.join(tmp, 'ext');
   mkdirSync(ext);
   const manifest = JSON.parse(readFileSync(path.join(repo, 'manifest.json'), 'utf8'));
+  manifest.content_scripts.unshift({
+    matches: ['<all_urls>'],
+    js: ['port-probe.js'],
+    all_frames: true,
+    run_at: 'document_start',
+  });
   manifest.content_scripts.push({
     matches: ['<all_urls>'],
     js: ['probe.js'],
@@ -73,6 +114,7 @@ function buildHarnessExtension(tmp) {
   });
   writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest, null, 2));
   writeFileSync(path.join(ext, 'probe.js'), PROBE_JS);
+  writeFileSync(path.join(ext, 'port-probe.js'), PORT_PROBE_JS);
   for (const file of ['content.js', 'page-bridge.js', 'background.js', 'devtools.html', 'devtools.js']) {
     copyFileSync(path.join(repo, file), path.join(ext, file));
   }
@@ -151,6 +193,11 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     assert.ok(/E2E\|tools:[^<]*addNote/.test(dom), 'the late-registered tool never showed up');
     // The page could not read the handshake nonce.
     assert.ok(dom.includes('nonce-steal:null'), 'the page saw the handshake nonce');
+    // The tool with a BigInt default crossed the extension Port too, in a
+    // tools message that still lists it, and the Port never refused one.
+    const throws = dom.match(/E2EPORT\|THROW:[^<]*/g) || [];
+    assert.deepEqual(throws, [], 'the Port refused a message');
+    assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message');
   } finally {
     server.close();
     rmSync(tmp, { recursive: true, force: true });

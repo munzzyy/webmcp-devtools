@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadContent } from './worldHarness.js';
+import { loadBridge, loadContent } from './worldHarness.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -76,4 +76,43 @@ test('after bridge-ready, no synthetic failure status is emitted', async () => {
   await wait(2300);
   const statuses = c.port().sent.filter((m) => m.type === 'status' && m.bridge === false);
   assert.equal(statuses.length, 0);
+});
+
+test('a tools message the Port cannot serialize becomes a loud read error, not silence', () => {
+  const c = loadContent();
+  c.postAsBridge({
+    type: 'tools',
+    origin: 'https://page.example',
+    hasModelContext: true,
+    tools: [{ toolId: 't1', name: 'bigDefault', inputSchema: { default: 1n } }],
+  }, { nonce: c.nonce });
+  const sent = c.port().sent;
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'tools');
+  assert.equal(sent[0].hasModelContext, true);
+  assert.equal(sent[0].tools.length, 0);
+  assert.ok(sent[0].error.includes('Could not serialize message.'), sent[0].error);
+});
+
+// Feeds the real bridge's output into the real relay, the same two hops a
+// tools message takes in Chrome, and checks what reaches the Port.
+test('bridge output with BigInt and cyclic tools reaches the Port listing every tool', async () => {
+  const looped = { type: 'object', properties: { x: { type: 'string' } } };
+  looped.self = looped;
+  const raw = [
+    { name: 'bigDefault', description: 'd', inputSchema: { type: 'object', properties: { n: { type: 'integer', default: 1n } } } },
+    { name: 'bigAnnotation', description: 'd', inputSchema: {}, annotations: { readOnlyHint: true, weight: 2n } },
+    { name: 'bigDescription', description: 10n, inputSchema: {} },
+    { name: 'looped', description: 'd', inputSchema: looped },
+  ];
+  const b = loadBridge({ modelContext: { async getTools() { return raw; } } });
+  await b.flush();
+  const { webmcpDevtools, nonce, ...toolsMsg } = b.ofType('tools').pop();
+
+  const c = loadContent();
+  c.postAsBridge(toolsMsg, { nonce: c.nonce });
+  const sent = c.port().sent.filter((m) => m.type === 'tools');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].error, undefined, sent[0].error);
+  assert.deepEqual([...sent[0].tools.map((t) => t.name)].sort(), ['bigAnnotation', 'bigDefault', 'bigDescription', 'looped']);
 });

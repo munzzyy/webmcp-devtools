@@ -23,6 +23,7 @@ const EMPTY_SCHEMA = Object.freeze({ type: 'object', properties: {} });
  *   inputSchemaError: string | null,
  *   annotations: { readOnlyHint: boolean, untrustedContentHint: boolean, [key: string]: unknown },
  *   origin: string,
+ *   degraded: string[],
  * }}
  */
 export function normalizeTool(raw) {
@@ -40,7 +41,18 @@ export function normalizeTool(raw) {
   const { inputSchema, inputSchemaError } = parseInputSchema(src.inputSchema);
   const annotations = normalizeAnnotations(src.annotations);
 
-  return { toolId, name, description, inputSchema, inputSchemaError, annotations, origin };
+  const degraded = normalizeDegraded(src.degraded);
+
+  return { toolId, name, description, inputSchema, inputSchemaError, annotations, origin, degraded };
+}
+
+// page-bridge.js lists the fields it had to replace with a lossy copy (a
+// BigInt, a cycle, a function) so they could cross the extension Port.
+const DEGRADABLE_FIELDS = new Set(['name', 'title', 'description', 'inputSchema', 'annotations']);
+
+function normalizeDegraded(rawDegraded) {
+  if (!Array.isArray(rawDegraded)) return [];
+  return [...new Set(rawDegraded.filter((f) => typeof f === 'string' && DEGRADABLE_FIELDS.has(f)))];
 }
 
 function parseInputSchema(rawSchema) {

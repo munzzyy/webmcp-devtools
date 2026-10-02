@@ -550,3 +550,30 @@ test('an invisible U+2063 separator is flagged, a leading BOM is not', () => {
   }));
   assert.ok(midBom.some((x) => x.id === 'uni-zw'), 'a mid-text BOM should still be flagged');
 });
+
+// --- page-bridge.js replaces a BigInt, cycle or function with a marker so
+// the tool can cross the extension Port, and lists the field in `degraded`.
+// The copy itself serializes cleanly, so that list is the only signal left. ---
+test('a field the bridge had to degrade is reported medium and named', () => {
+  const f = lintTool(normalizeTool({
+    name: 'helper',
+    description: 'A perfectly normal helper.',
+    inputSchema: { type: 'object', properties: { n: { type: 'integer', default: '1n' } } },
+    annotations: { readOnlyHint: true },
+    degraded: ['inputSchema', 'annotations'],
+  }));
+  const hit = f.find((x) => x.id === 'unserializable');
+  assert.ok(hit, JSON.stringify(f));
+  assert.equal(hit.severity, 'medium');
+  assert.ok(hit.title.includes('inputSchema, annotations'), hit.title);
+});
+
+test('a tool with nothing degraded gets no relay finding', () => {
+  const f = lintTool(normalizeTool({
+    name: 'getBalance',
+    description: 'Returns the balance.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { readOnlyHint: true },
+  }));
+  assert.equal(f.filter((x) => x.id === 'unserializable').length, 0, JSON.stringify(f));
+});

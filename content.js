@@ -126,12 +126,36 @@
     });
   }
 
+  // port.postMessage throws on a closed port (onDisconnect drives the
+  // reconnect) and on a payload the Port cannot serialize. A tools list lost
+  // to the second case must not leave the panel on an older, clean list, so
+  // it is replaced by an explicit read error.
   function postSafe(message) {
     if (!port) return;
     try {
       port.postMessage(message);
     } catch (err) {
-      // port already closed; onDisconnect drives the reconnect
+      if (message && message.type === 'tools') {
+        try {
+          port.postMessage({
+            type: 'tools',
+            origin: typeof message.origin === 'string' ? message.origin : safeOrigin(),
+            hasModelContext: true,
+            tools: [],
+            error: `relaying tools failed: ${describeError(err)}`,
+          });
+        } catch (err2) {
+          // the port itself is gone
+        }
+      }
+    }
+  }
+
+  function describeError(err) {
+    try {
+      return err && typeof err.message === 'string' ? err.message : String(err);
+    } catch (err2) {
+      return 'unknown error';
     }
   }
 
