@@ -29,6 +29,7 @@ const toolsByFrame = new Map();
 // frameId:toolId -> Set of field names the page changed after registration
 const mutatedFields = new Map();
 let timelineState = createTimelineState();
+let renderedTimeline = []; // { entry, node } on screen, newest first
 let selectedToolKey = null; // { frameId, toolId, fingerprint } | null
 let lastDetailKey = null; // which selection the execute result panes belong to
 let callCounter = 0;
@@ -670,12 +671,33 @@ function renderDetail() {
   }
 }
 
+// The reducer only prepends and trims the tail, and it keeps the existing
+// entry objects, so an event adds one node and drops at most one.
+// Rebuilding all 500 entries per event let a page that calls a tool in a
+// loop lock up the panel.
 function renderTimeline() {
   const list = document.getElementById('timeline-list');
-  clear(list);
-  for (const entry of timelineState.entries) {
-    list.appendChild(renderTimelineEntry(entry));
+  const entries = timelineState.entries;
+  const live = new Set(entries);
+  const kept = [];
+  for (const item of renderedTimeline) {
+    if (live.has(item.entry)) kept.push(item);
+    else list.removeChild(item.node);
   }
+  const fresh = entries.length - kept.length;
+  if (!kept.every((item, i) => entries[fresh + i] === item.entry)) {
+    clear(list);
+    renderedTimeline = entries.map((entry) => ({ entry, node: list.appendChild(renderTimelineEntry(entry)) }));
+    return;
+  }
+  const anchor = kept.length > 0 ? kept[0].node : null;
+  const added = [];
+  for (let i = 0; i < fresh; i += 1) {
+    const node = renderTimelineEntry(entries[i]);
+    list.insertBefore(node, anchor);
+    added.push({ entry: entries[i], node });
+  }
+  renderedTimeline = [...added, ...kept];
 }
 
 function renderTimelineEntry(entry) {

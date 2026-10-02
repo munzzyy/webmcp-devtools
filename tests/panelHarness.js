@@ -6,7 +6,7 @@
 // (duplicate names, navigation, read errors) worth pinning, and importing the
 // real panel.js against a fake DOM tests that logic directly rather than a copy
 // of it. This is NOT a general DOM: it implements exactly what panel.js touches
-// (textContent, appendChild/removeChild/firstChild, addEventListener, class,
+// (textContent, appendChild/removeChild/insertBefore/firstChild, addEventListener, class,
 // setAttribute, hidden, value, classList.add, createElement/createTextNode).
 
 const PANEL_IDS = [
@@ -47,6 +47,16 @@ class FakeNode {
 
   removeChild(node) {
     this.children = this.children.filter((c) => c !== node);
+    node.parent = null;
+    return node;
+  }
+
+  insertBefore(node, ref) {
+    if (node.parent) node.parent.removeChild(node);
+    const at = ref ? this.children.indexOf(ref) : -1;
+    if (at === -1) this.children.push(node);
+    else this.children.splice(at, 0, node);
+    node.parent = this;
     return node;
   }
 
@@ -98,10 +108,15 @@ export async function loadPanel() {
   const byId = new Map();
   for (const id of PANEL_IDS) byId.set(id, new FakeNode('div'));
 
+  // createElement is counted so a test can pin how much DOM one event builds.
+  let createdElements = 0;
   const document = {
     body: new FakeNode('body'),
     getElementById: (id) => byId.get(id) || null,
-    createElement: (tag) => new FakeNode(tag),
+    createElement: (tag) => {
+      createdElements += 1;
+      return new FakeNode(tag);
+    },
     createTextNode: (text) => new FakeText(text),
   };
 
@@ -164,6 +179,7 @@ export async function loadPanel() {
     rows: () => byId.get('tools-tbody').children,
     clipboardWrites,
     setClipboardFails: (fails) => { navigator._clipboardFails = fails; },
+    createdElements: () => createdElements,
   };
 }
 loadPanel.counter = 0;

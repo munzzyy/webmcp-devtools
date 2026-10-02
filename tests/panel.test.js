@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPanel } from './panelHarness.js';
+import { createTimelineState, timelineReducer, DEFAULT_TIMELINE_CAP } from '../core/timelineReducer.js';
 
 const tool = (toolId, name, description, extra = {}) => ({
   toolId,
@@ -383,4 +384,34 @@ test('the detail pane shows a tool title as text when there is one', async () =>
   p.rows()[0].dispatch('click');
   assert.equal(p.el('detail-title').hidden, true);
   assert.equal(p.text('detail-title'), '');
+});
+
+test('a call flood adds one timeline entry per call instead of rebuilding the list', async () => {
+  const p = await loadPanel();
+  const call = (i) => ({
+    type: 'observedCall', frameId: 0, origin: 'https://x', initiator: 'page',
+    toolName: `tool${i}`, argsJson: '{}', ok: true, result: { i }, timestamp: 1000 + i,
+  });
+  let expected = createTimelineState();
+  for (let i = 0; i < 600; i += 1) {
+    p.emit(call(i));
+    expected = timelineReducer(expected, { ...call(i), type: 'call' });
+  }
+  const before = p.createdElements();
+  p.emit(call(600));
+  expected = timelineReducer(expected, { ...call(600), type: 'call' });
+  const built = p.createdElements() - before;
+  assert.ok(built <= 10, `one more call built ${built} elements`);
+
+  const items = p.el('timeline-list').children;
+  assert.equal(items.length, DEFAULT_TIMELINE_CAP);
+  const shown = items.map((li) => li.children[1].textContent);
+  assert.deepEqual(shown, expected.entries.map((e) => `observed call: ${e.toolName}`));
+  assert.equal(shown[0], 'observed call: tool600');
+  assert.equal(shown[shown.length - 1], 'observed call: tool101');
+
+  p.el('clear-timeline-btn').dispatch('click');
+  assert.equal(p.el('timeline-list').children.length, 0);
+  p.emit(call(601));
+  assert.deepEqual(p.el('timeline-list').children.map((li) => li.children[1].textContent), ['observed call: tool601']);
 });
