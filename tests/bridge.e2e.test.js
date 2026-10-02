@@ -7,19 +7,15 @@
 // crosses worlds. Loads the real extension (plus read-only probe scripts)
 // into headless Chromium against tests/fixtures/registertool-page.html, which
 // registers tools via document.modelContext.registerTool.
-//
-// Chrome is driven over the DevTools protocol with Node's built-in fetch and
-// WebSocket (Node 22+), polling the page for the probes' markers. The older
-// --dump-dom run never returns in Chrome for Testing 154.
+// Driven over CDP (Node 22+), because --dump-dom never returns in Chrome for Testing 154.
 //
 // Opt-in and loud about it: run with
 //
 //   WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js
 //
 // When the env var or a Chrome binary is missing the test SKIPS with a "did
-// not run" message -- it never silently passes. CI also sets
-// WEBMCP_E2E_REQUIRED=1, which turns any skip into a failure, so a job
-// that could not run Chrome goes red instead of green.
+// not run" message -- it never silently passes. WEBMCP_E2E_REQUIRED=1 (set in
+// CI) turns that skip into a failure.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -67,11 +63,7 @@ const PROBE_JS = `window.addEventListener('message', (event) => {
 });
 `;
 
-// The window probe cannot see the last hop: content.js handing each message
-// to the extension Port, which JSON-serializes and throws on a BigInt or a
-// cycle. This one runs in the same isolated world BEFORE content.js, wraps
-// chrome.runtime.connect, and records every port.postMessage outcome in the
-// DOM. It rethrows, so content.js sees exactly what it would have seen.
+// Runs before content.js and records every port.postMessage outcome; it rethrows.
 const PORT_PROBE_JS = `(() => {
   const record = (text) => {
     const el = document.createElement('div');
@@ -177,8 +169,7 @@ function connectDevTools(wsUrl) {
   });
 }
 
-// Loads `url` with the harness extension and returns the page's HTML once
-// `settled(html)` holds, or whatever it has when the deadline passes.
+// Returns the page's HTML once settled(html) holds, or whatever it has at the deadline.
 async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   const profile = path.join(tmp, 'profile');
@@ -189,8 +180,7 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
     '--no-default-browser-check',
     `--user-data-dir=${profile}`,
     `--load-extension=${ext}`,
-    // Chrome 154 turns native WebMCP on by default. This test is about a
-    // page-installed modelContext, so keep the native one out of the way.
+    // Chrome 154 enables native WebMCP by default; this test is about the page's own.
     '--disable-features=WebMCP',
     '--remote-debugging-port=0',
     'about:blank',
@@ -256,8 +246,7 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
   try {
     const ext = buildHarnessExtension(tmp);
     const url = `http://127.0.0.1:${port}/registertool-page.html`;
-    // The fixture's last step registers addNote at 1.4 s. Once that tools
-    // message is on the window, give the Port side a moment to report too.
+    // addNote is the fixture's last step; after it, give the Port side a moment.
     const windowDone = (html) => /E2E\|tools:[^<]*addNote/.test(html) && html.includes('E2E|observedCall:getInventory');
     const dom = await loadInChrome(chrome, tmp, ext, url, (html) => {
       if (!windowDone(html)) return false;
@@ -280,8 +269,7 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     assert.ok(/E2E\|tools:[^<]*addNote/.test(dom), 'the late-registered tool never showed up' + seen);
     // The page could not read the handshake nonce.
     assert.ok(dom.includes('nonce-steal:null'), 'the page saw the handshake nonce' + seen);
-    // The tool with a BigInt default crossed the extension Port too, in a
-    // tools message that still lists it, and the Port never refused one.
+    // countItems has a BigInt default: it must reach the Port, and nothing may be refused.
     const throws = dom.match(/E2EPORT\|THROW:[^<]*/g) || [];
     assert.deepEqual(throws, [], 'the Port refused a message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);

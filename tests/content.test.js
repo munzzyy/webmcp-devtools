@@ -94,8 +94,7 @@ test('a tools message the Port cannot serialize becomes a loud read error, not s
   assert.ok(sent[0].error.includes('Could not serialize message.'), sent[0].error);
 });
 
-// Feeds the real bridge's output into the real relay, the same two hops a
-// tools message takes in Chrome, and checks what reaches the Port.
+// The real bridge's output through the real relay, the two hops it takes in Chrome.
 test('bridge output with BigInt and cyclic tools reaches the Port listing every tool', async () => {
   const looped = { type: 'object', properties: { x: { type: 'string' } } };
   looped.self = looped;

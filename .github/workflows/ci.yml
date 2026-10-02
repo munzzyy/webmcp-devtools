@@ -23,9 +23,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - run: node --test
 
-  # The only test that crosses Chrome's world boundary. Branded Chrome
-  # ignores --load-extension, so this uses Chrome for Testing, fetched from
-  # its official last-known-good JSON with no third-party action.
+  # Chrome for Testing, because branded Chrome ignores --load-extension.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -53,8 +51,7 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/chrome-linux64.zip" "$url"
           unzip -q "$RUNNER_TEMP/chrome-linux64.zip" -d "$RUNNER_TEMP"
           echo "CHROME_BIN=$RUNNER_TEMP/chrome-linux64/chrome" >> "$GITHUB_ENV"
-      # Ubuntu 24.04 blocks the unprivileged user namespaces Chrome's
-      # sandbox needs; this is the runner-side switch, not --no-sandbox.
+      # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
       - name: Let Chrome's sandbox start
         run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
       - run: node --test tests/bridge.e2e.test.js

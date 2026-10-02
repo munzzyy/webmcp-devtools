@@ -54,8 +54,7 @@ const INJECTION_PATTERNS = [
 const SINK = /(?:webhook\.site|requestbin\.\w+|pipedream\.net|hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|(?<![0-9a-z-])[0-9a-z-]{1,63}\.ngrok(?:-free)?\.(?:io|app|dev)|pastebin\.com|transfer\.sh|0x0\.st|\.oast\.(?:fun|live|pro|online|site)|burpcollaborator\.net|interact\.sh|dnslog\.cn)/i;
 
 // Credential formats that should never appear in a tool description or schema.
-// OpenAI project and service-account keys and GitHub fine-grained tokens
-// carry '-' and '_' that the older sk-/gh*_ shapes do not allow.
+// sk-proj-, sk-svcacct- and github_pat_ tokens carry '-' and '_' the older shapes reject.
 const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj|svcacct)-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/;
 
 // Parameter names that are dangerous when free-form (arbitrary payload passthrough).
@@ -68,10 +67,7 @@ const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|
 // verdict here as from the CLI.
 const UNTRUSTED_CONTENT_TEXT = /\b(?:returns?\s+(?:raw\s+)?html|user[\s-]generated\s+content|user\s+content|third[\s-]party\s+content|scrapes?|crawls?|fetch(?:es|ing|ed)?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|site|content)|reads?\s+(?:a\s+|the\s+)?(?:web\s?page|page|website|url)|retrieves?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|content)|downloads?\s+(?:a\s+|the\s+)?(?:file|page|content|url)|parses?\s+html|external\s+(?:content|data|website|page)|search(?:es)?\s+the\s+web|queries?\s+(?:a\s+|the\s+)?(?:web|internet|search\s+engine))\b/i;
 
-// Cyrillic and Greek letters that render like a Latin one. Folding them lets
-// "ign\u043ere" (with a Cyrillic o) match the injection patterns, and a word
-// that mixes them into Latin letters is flagged on its own. Deliberately
-// small: only letters a reader cannot tell apart from the Latin one.
+// Cyrillic and Greek letters a reader cannot tell from Latin, folded before matching.
 const CONFUSABLES = new Map([
   ['\u0430', 'a'], ['\u0435', 'e'], ['\u043e', 'o'], ['\u0440', 'p'], ['\u0441', 'c'], ['\u0443', 'y'],
   ['\u0445', 'x'], ['\u0455', 's'], ['\u0456', 'i'], ['\u0458', 'j'], ['\u04bb', 'h'], ['\u04cf', 'l'],
@@ -129,20 +125,15 @@ function injectionHits(text) {
   return INJECTION_PATTERNS.filter(([rx]) => variants.some((v) => rx.test(v)));
 }
 
-// Text the endpoint and credential patterns run on. NFKC turns "webhook.site"
-// spelled in fullwidth letters back into the plain host the agent would read.
+// NFKC plus the look-alike fold, so a fullwidth or Cyrillic-spelled host still matches.
 function patternText(text) {
   return foldConfusables(String(text).normalize('NFKC'));
 }
 
-// Characters that render as nothing. U+3164, U+115F, U+1160 and U+FFA0 are
-// Hangul fillers, U+180E the old Mongolian vowel separator, and U+034F the
-// combining grapheme joiner; outside the scripts that use them they only
-// hide or break up text.
+// Renders as nothing; includes the Hangul fillers, U+180E and the grapheme joiner U+034F.
 const INVISIBLE = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xfeff, 0x00ad,
   0x3164, 0x115f, 0x1160, 0xffa0, 0x180e, 0x034f]);
-// Letters only: U+061C itself counts as Arabic script, so the mark alone
-// must not satisfy the check.
+// Letters only: U+061C itself counts as Arabic script.
 const RTL_LETTER = /[\p{L}&&[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Samaritan}\p{Script=Mandaic}\p{Script=Adlam}\p{Script=Hanifi_Rohingya}\p{Script=Yezidi}]]/v;
 const EMOJI_BASE = /\p{Extended_Pictographic}/u;
 const IDEOGRAPH = /\p{Ideographic}/u;
@@ -151,10 +142,7 @@ function isVariationSelector(cp) {
   return (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
 }
 
-// A variation selector picks the glyph of the character right before it: an
-// emoji (U+2764 U+FE0F is the red heart), a keycap digit, or a CJK
-// ideograph (U+E0100 and up). One anywhere else, or a run of them, is the
-// carrier for text hidden as variation-selector bytes.
+// Only right after the emoji, keycap digit or ideograph it styles, and never in a run.
 function variationSelectorAllowed(cps, i) {
   const cp = cps[i];
   const prev = i > 0 ? cps[i - 1] : -1;
@@ -279,20 +267,11 @@ function serializeLossy(value, ancestors, depth) {
   return out;
 }
 
-// Every string in the schema reaches the agent as part of the tool
-// definition: descriptions and titles, but also defaults, examples,
-// $comment, and vendor x-* keys. A walk that only reads description/title
-// leaves all of those as clean hiding places. Strings under default,
-// examples, const and enum are data the page supplies, so they are scanned
-// like everything else but never count toward the description size budget.
+// Strings under these are page data: scanned, but never counted against the description budget.
 const SCHEMA_DATA_KEYS = new Set(['default', 'examples', 'const', 'enum']);
 const MAX_SCHEMA_DEPTH = 12;
 
-// Walks the schema and collects every string with the path it was found at
-// and a kind: 'name' for a property name, 'key' for any other object key,
-// 'description' for a schema description, 'value' for everything else.
-// Bounded by depth and by a shared character budget so a hostile schema
-// cannot turn the walk itself into the DoS.
+// Every string and key with its path and kind, capped by depth and a shared character budget.
 function collectSchemaStrings(schema, budgetChars) {
   const out = [];
   let budget = budgetChars;
@@ -445,8 +424,7 @@ export function lintTool(tool) {
 
   // Params only get flagged when a risky NAME meets a free-form spec - "url" as an
   // enum of three values is fine, "url" as an unbounded string is a payload channel.
-  // Nested params count too: a "command" inside an options object or a batch
-  // array item is reachable exactly like a top-level one.
+  // Nested ones too: a "command" in an options object or batch item is just as reachable.
   let overparams = 0;
   let overparamsSkipped = 0;
   for (const { pointer, name: propName, spec } of schemaParameters(schema)) {
@@ -576,11 +554,7 @@ function isReadShaped(name) {
   return false;
 }
 
-// The same traversal as webmcp-lint's _schema_walk.py, so both linters see
-// the same parameters: map keys hold name -> subschema, sub keys hold a
-// subschema or a list of them, and only `properties` names are real
-// parameter names. Depth-capped, and each object is visited once, so a
-// self-referencing schema terminates.
+// Same keys and depth cap as webmcp-lint's _schema_walk.py; each object is visited once.
 const SCHEMA_MAP_KEYS = ['properties', 'patternProperties', 'definitions', '$defs'];
 const SCHEMA_SUB_KEYS = ['items', 'additionalItems', 'additionalProperties', 'contains', 'propertyNames',
   'not', 'if', 'then', 'else', 'allOf', 'anyOf', 'oneOf'];
@@ -627,9 +601,7 @@ function schemaParameters(schema) {
   return out;
 }
 
-// Follows a local "#/..." JSON pointer inside the input schema. Anything else
-// (another document, an anchor, a path that is not there) resolves to
-// undefined: its shape is unknown, so it is not called free-form.
+// Local "#/..." pointers only; anything else is an unknown shape, not a free-form one.
 function resolveLocalRef(root, ref) {
   if (ref === '#') return root;
   if (!ref.startsWith('#/')) return undefined;
@@ -652,8 +624,7 @@ function isFreeformString(spec, root, hops) {
   const constrained = spec.enum || spec.const || spec.format || spec.pattern ||
     typeof spec.maxLength === 'number' || Array.isArray(spec.allOf) ||
     Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
-  // A $ref-only spec has no type of its own; its shape is whatever it points
-  // at, so judge the target instead of calling it untyped.
+  // A $ref-only spec is judged by its target, not as untyped.
   if (typeof spec.$ref === 'string') {
     const ownType = spec.type;
     const allowsString = ownType === undefined || ownType === 'string' || (Array.isArray(ownType) && ownType.includes('string'));

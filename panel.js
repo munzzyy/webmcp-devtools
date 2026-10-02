@@ -346,9 +346,7 @@ function clear(el) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-// The status bar is an aria-live region, so rebuilding it on every message
-// made screen readers re-announce it constantly. Build the badges as plain
-// descriptions first and only touch the DOM when they actually changed.
+// aria-live: touch the DOM only when the badges changed, or screen readers re-announce them.
 function renderStatusBar() {
   const items = statusBarItems();
   const signature = JSON.stringify(items);
@@ -505,11 +503,7 @@ function findingsFor(frameId, tool) {
   ];
 }
 
-// Copies the current audit as JSON, so a user can file a bug or hand it to a
-// teammate without retyping findings -- the CLI sibling has --json for the
-// same reason. It carries the same states the status bar shows: a frame whose
-// bridge never ran, a read error, or a dropped connection must not come out
-// as an empty, clean-looking list.
+// Carries frame state too, so a dead bridge or a dropped connection never exports as clean.
 function copyFindingsToClipboard() {
   const frames = [...toolsByFrame.entries()]
     .sort(([a], [b]) => (a > b ? 1 : a < b ? -1 : 0))
@@ -546,11 +540,7 @@ function copyFindingsToClipboard() {
   navigator.clipboard.writeText(json).then(() => flash('Copied!'), () => flash('Copy failed'));
 }
 
-// Rows are keyed by frame and toolId and reused across renders. Rebuilding
-// the table removed the focused row, so pressing Enter on a row (which
-// re-renders to show the selection) or any re-announcement from the page
-// dropped keyboard focus to the page body. A row only moves when the sort
-// order actually changed, and its cells are only rebuilt when they differ.
+// Rows are reused by key, so a re-render never removes the row that has keyboard focus.
 function renderToolsTable() {
   const tbody = document.getElementById('tools-tbody');
   const rows = flattenTools();
@@ -689,10 +679,7 @@ function renderDetail() {
   }
 }
 
-// The reducer only prepends and trims the tail, and it keeps the existing
-// entry objects, so an event adds one node and drops at most one.
-// Rebuilding all 500 entries per event let a page that calls a tool in a
-// loop lock up the panel.
+// The reducer only prepends and trims, so add the new node and drop the tail.
 function renderTimeline() {
   const list = document.getElementById('timeline-list');
   const entries = timelineState.entries;

@@ -126,10 +126,7 @@
     });
   }
 
-  // port.postMessage throws on a closed port (onDisconnect drives the
-  // reconnect) and on a payload the Port cannot serialize. A tools list lost
-  // to the second case must not leave the panel on an older, clean list, so
-  // it is replaced by an explicit read error.
+  // A tools list the Port cannot serialize becomes a read error, never silence.
   function postSafe(message) {
     if (!port) return;
     try {

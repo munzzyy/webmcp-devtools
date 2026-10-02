@@ -233,9 +233,7 @@ test('a registerTool-only build (no getTools) still enumerates observed registra
   assert.equal(tools.tools[0].via, 'registerTool');
 });
 
-// A real extension Port JSON-serializes, so a BigInt or a cycle anywhere in a
-// tools message used to drop the whole list there. Each of these must come
-// out JSON-safe, still listing the tool, with the lossy field named.
+// Each must arrive JSON-safe and still listed, with the lossy field named.
 const unserializableTools = () => {
   const looped = { type: 'object', properties: { x: { type: 'string' } } };
   looped.self = looped;
@@ -259,8 +257,7 @@ for (const [name, field, extra] of unserializableTools()) {
     assert.deepEqual([...projected.degraded], [field]);
     assert.equal(msg.tools.find((t) => t.name === 'getWeather').degraded, undefined);
 
-    // The lossy copy is clean JSON, so the lint signal has to come from the
-    // degraded marker rather than from re-serializing the schema.
+    // The copy is clean JSON, so the finding has to come from the degraded marker.
     const findings = lintTool(normalizeTool(JSON.parse(JSON.stringify(projected))));
     const hit = findings.find((f) => f.id === 'unserializable');
     assert.ok(hit, JSON.stringify(findings));

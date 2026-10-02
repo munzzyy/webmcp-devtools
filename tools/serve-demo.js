@@ -1,12 +1,5 @@
 #!/usr/bin/env node
-// tools/serve-demo.js
-//
-// Serves examples/ over http on 127.0.0.1 so the demo page can be opened in
-// Chrome. Opened straight from disk it does nothing: browsers block module
-// imports from file://, so demo.html never gets its tools.
-//
-//   node tools/serve-demo.js          (picks a free port)
-//   node tools/serve-demo.js 8080
+// Usage: node tools/serve-demo.js [port]. Serves examples/, since file:// blocks the demo's module import.
 
 import { createServer } from 'node:http';
 import { readFile, realpath, stat } from 'node:fs/promises';
@@ -21,9 +14,7 @@ const TYPES = {
   '.js': 'text/javascript; charset=utf-8',
 };
 
-// Maps a request path to a file under root, or null. Works on the raw path
-// rather than a parsed URL, so an encoded "..%2f" is decoded before the
-// containment check instead of slipping past URL normalization.
+// Decodes the raw path before the containment check, so "..%2f" cannot slip past it.
 export async function resolveDemoFile(rawUrl, root = EXAMPLES_DIR) {
   let decoded;
   try {
@@ -72,8 +63,7 @@ export function createDemoServer(root = EXAMPLES_DIR) {
   });
 }
 
-// Loopback only: the demo registers a tool that pretends to run shell
-// commands, and nothing on the network needs to see it.
+// Loopback only: the demo has a tool that pretends to run shell commands.
 export function startDemoServer(port = 0, root = EXAMPLES_DIR) {
   const server = createDemoServer(root);
   return new Promise((resolve, reject) => {

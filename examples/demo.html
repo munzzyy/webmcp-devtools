@@ -60,10 +60,7 @@
       // @mcp-b/webmcp-polyfill; this file re-implements only what's needed to
       // exercise the panel end to end.
       //
-      // With chrome://flags/#enable-webmcp-testing on, Chrome already puts a
-      // getter-only document.modelContext on every page, so assigning the shim
-      // would throw. In that case the same tools go through the native
-      // registerTool instead.
+      // Where Chrome's native modelContext exists, the shim can't be assigned; register natively.
       //
       // The 4 sample tools' metadata lives in demo-tools.js, shared with
       // tools/demo-lint.js's headless run -- this script only adds the
@@ -121,9 +118,7 @@
           registry.unregister('getWeather');
         });
 
-        // Native registerTool wants inputSchema as an object (a JSON string
-        // throws TypeError), and unregistering is done by aborting the signal
-        // the tool was registered with.
+        // Native registerTool rejects a string inputSchema and unregisters on abort.
         function nativeRegistry(mc) {
           const controllers = new Map(); // name -> AbortController
           return {

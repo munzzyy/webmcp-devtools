@@ -173,8 +173,7 @@
   // Strips non-cloneable/live fields and otherwise leaves the tool exactly as
   // the page provided it. Parsing/normalization happens in the panel via
   // core/normalizeTool.js so that logic stays in one pure, unit-tested place.
-  // Fields that had to be degraded are listed in `degraded`, so the panel can
-  // report the lossy copy instead of linting it as if it were the original.
+  // `degraded` names the fields sent as a lossy copy.
   function projectTool(raw, toolId, via) {
     const src = raw && typeof raw === 'object' ? raw : {};
     const degraded = [];
@@ -198,11 +197,7 @@
     return projection;
   }
 
-  // A tools message crosses two hops. window.postMessage structured-clones
-  // it, which throws on functions, symbols and DOM nodes. The extension Port
-  // after it JSON-serializes, which throws "Could not serialize message." on
-  // a BigInt or a cycle, both of which structured clone accepts. A field that
-  // fails either hop would take the frame's whole tool list down with it.
+  // Structured clone, then the Port's JSON: one failing field would drop the whole tool list.
   function survivesPort(value) {
     try {
       structuredClone(value);
@@ -215,9 +210,7 @@
 
   const MAX_COPY_DEPTH = 32;
 
-  // A plain-JSON copy that keeps the original shape so the panel can still
-  // show and lint it: BigInt becomes "123n", functions and symbols become
-  // markers, and a cycle back to an ancestor becomes "[Circular]".
+  // Keeps the shape, with markers in place of BigInt ("1n"), functions and cycles.
   function lossyCopy(value, ancestors, depth) {
     const t = typeof value;
     if (value === null || t === 'string' || t === 'boolean') return value;

@@ -30,9 +30,7 @@
             return desc.execute(args);
           },
         });
-        // An own property, not a plain assignment: where Chrome has a native
-        // getter-only modelContext, a classic script's assignment is
-        // silently ignored and the page would end up on the native API.
+        // defineProperty: a native getter-only modelContext silently ignores assignment.
         Object.defineProperty(document, 'modelContext', { value: mc, configurable: true, enumerable: true });
 
         // A page script trying to steal the handshake nonce must come up empty:
@@ -51,8 +49,7 @@
             return { items: ['apple', 'anvil'], limit: args && args.limit };
           },
         });
-        // A BigInt survives structured clone but not the extension Port's
-        // JSON serialization, so the bridge has to degrade it on the way out.
+        // Structured clone keeps a BigInt; the Port's JSON does not.
         document.modelContext.registerTool({
           name: 'countItems',
           description: 'Count the items in the demo inventory.',

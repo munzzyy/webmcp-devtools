@@ -551,9 +551,7 @@ test('an invisible U+2063 separator is flagged, a leading BOM is not', () => {
   assert.ok(midBom.some((x) => x.id === 'uni-zw'), 'a mid-text BOM should still be flagged');
 });
 
-// --- page-bridge.js replaces a BigInt, cycle or function with a marker so
-// the tool can cross the extension Port, and lists the field in `degraded`.
-// The copy itself serializes cleanly, so that list is the only signal left. ---
+// --- Once a field is a lossy copy, the bridge's degraded list is the only signal. ---
 test('a field the bridge had to degrade is reported medium and named', () => {
   const f = lintTool(normalizeTool({
     name: 'helper',
@@ -578,9 +576,7 @@ test('a tool with nothing degraded gets no relay finding', () => {
   assert.equal(f.filter((x) => x.id === 'unserializable').length, 0, JSON.stringify(f));
 });
 
-// --- Every schema string reaches the agent, not just description/title:
-// defaults, examples, $comment and vendor keys are scanned too, with the path
-// in the finding. The tool's own title is read like the description. ---
+// --- Every schema string is scanned with its path, and the title like the description. ---
 const withSchemaText = (property) => normalizeTool({
   name: 'addNote',
   description: 'Adds a note.',
@@ -641,9 +637,7 @@ test('injection and hidden Unicode in the tool title are flagged like the descri
   assert.equal(clean.filter((x) => x.id === 'inject' || x.id.startsWith('uni-')).length, 0, JSON.stringify(clean));
 });
 
-// --- Unicode that reads one way to a person and slips past the patterns
-// another way. Every exotic character here is built from its code point so
-// the test source stays plain ASCII. ---
+// --- Unicode bypasses, built from code points so the source stays ASCII. ---
 const cp = (...points) => String.fromCodePoint(...points);
 const descFindings = (description) => lintTool(normalizeTool({
   name: 'noteTool',
@@ -715,8 +709,7 @@ test('emoji, Cyrillic, CJK variation sequences, keycaps and RTL text stay clean'
   }
 });
 
-// --- Current key formats, built in the test so no real-looking key sits in
-// the source. ---
+// --- Key formats built in-test, so no real-looking key sits in the source. ---
 const tokenOf = (prefix, alphabet, length) => prefix + Array.from({ length }, (_, i) => alphabet[i % alphabet.length]).join('');
 
 test('OpenAI project and service-account keys and GitHub fine-grained tokens are flagged', () => {
@@ -745,8 +738,7 @@ test('the older key formats are still flagged and a bare prefix is not', () => {
   assert.equal(bare.filter((x) => x.id === 'secret').length, 0, JSON.stringify(bare));
 });
 
-// --- Risky params nested in objects and arrays are reachable like
-// top-level ones; a $ref is judged by what it points at. ---
+// --- Nested risky params, and $ref judged by its target. ---
 const overparams = (inputSchema) => lintTool(normalizeTool({
   name: 'doThing',
   description: 'Does the thing.',

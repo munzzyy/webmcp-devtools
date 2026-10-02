@@ -1,8 +1,4 @@
-// tests/serveDemo.test.js
-//
-// tools/serve-demo.js is how the README tells people to open the demo, so
-// pin the two things that matter about it: it only listens on loopback, and
-// it only hands out files from examples/.
+// tools/serve-demo.js: loopback only, and files from examples/ only.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,8 +10,7 @@ import { startDemoServer } from '../tools/serve-demo.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-// Raw request so the path goes out byte for byte; fetch() would normalize
-// "/../" away before it ever reached the server.
+// Raw request: fetch() would normalize "/../" away before it reached the server.
 function rawGet(port, rawPath) {
   return new Promise((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, path: rawPath, method: 'GET' }, (res) => {

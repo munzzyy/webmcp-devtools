@@ -59,8 +59,7 @@ class FakeNode {
     return this.children.some((c) => c instanceof FakeNode && c.contains(node));
   }
 
-  // Like a real DOM: the focused element is whatever was focused last, and
-  // removing it (or anything around it) drops focus back to the body.
+  // Removing the focused node, or an ancestor, drops focus to the body like a real DOM.
   focus() {
     if (FakeNode.document) FakeNode.document.activeElement = this;
   }

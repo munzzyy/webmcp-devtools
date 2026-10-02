@@ -140,8 +140,7 @@ export function loadContent() {
           disconnectHandlers: [],
           onMessage: { addListener(fn) { port.messageHandlers.push(fn); } },
           onDisconnect: { addListener(fn) { port.disconnectHandlers.push(fn); } },
-          // A real Port JSON-serializes and throws this on a BigInt or a cycle
-          // (verified in Chromium 153), so the fake must refuse the same input.
+          // Chromium 153's Port throws this on a BigInt or a cycle; the fake must too.
           postMessage(msg) {
             try {
               JSON.stringify(msg);

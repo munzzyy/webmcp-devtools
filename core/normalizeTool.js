@@ -48,8 +48,7 @@ export function normalizeTool(raw) {
   return { toolId, name, title, description, inputSchema, inputSchemaError, annotations, origin, degraded };
 }
 
-// page-bridge.js lists the fields it had to replace with a lossy copy (a
-// BigInt, a cycle, a function) so they could cross the extension Port.
+// Fields page-bridge.js had to send as a lossy copy to get them across the Port.
 const DEGRADABLE_FIELDS = new Set(['name', 'title', 'description', 'inputSchema', 'annotations']);
 
 function normalizeDegraded(rawDegraded) {
