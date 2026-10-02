@@ -152,7 +152,7 @@ What the fakes cannot prove is that a MAIN-world script really sees a page-insta
 
 ## Roadmap
 
-What is left needs someone other than this repo's code: a release, a store account, or a person in front of a real DevTools window.
+What is left needs someone other than this repo's code: a store account, or a person in front of a real DevTools window.
 
 - The Chrome Web Store. Install is load-unpacked only for now. A listing needs a developer account and a privacy disclosure for a content script that runs on every site, and whether to list it at all is still an open decision.
 - A hand check of Copy findings as JSON in real DevTools. The tests fake the clipboard, and nobody has confirmed yet that Chrome lets an extension's DevTools panel write to it.
