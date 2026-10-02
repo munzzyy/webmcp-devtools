@@ -106,7 +106,7 @@ examples/demo-tools.js Metadata for those 4 sample tools, shared with tools/demo
 tools/demo-lint.js     Headless: lints the 4 sample tools with plain node, no Chrome needed
 tools/serve-demo.js    Serves examples/ on 127.0.0.1 so the demo page loads over http
 icons/                Extension + panel icons
-.github/workflows/ci.yml   node --test on Node 20 and 22
+.github/workflows/ci.yml   node --test on Node 22, 24 and 26
 ```
 
 ## Architecture

@@ -89,3 +89,12 @@ test('every file referenced by manifest.json exists on disk', () => {
     assert.doesNotThrow(() => readFileSync(fullPath), `expected manifest-referenced file to exist: ${relativePath}`);
   }
 });
+
+// The extension reported 0.1.0 even at the v0.2.0 tag. Whatever the next
+// version is, both files have to say the same thing.
+test('manifest.json and package.json carry the same version', () => {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const pkg = JSON.parse(readFileSync(path.join(here, '..', 'package.json'), 'utf8'));
+  assert.equal(typeof manifest.version, 'string');
+  assert.equal(manifest.version, pkg.version);
+});
