@@ -148,6 +148,14 @@ Runs the pure `core/` unit tests, the `lint.js` security tests, and structural c
 
 What the fakes cannot prove is that a MAIN-world script really sees a page-installed `modelContext` across Chrome's world boundary. `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` covers that: it loads the real extension into headless Chromium against a fixture page that registers tools via `document.modelContext.registerTool` and asserts the whole relay end to end, up to what reaches the extension Port. It drives Chrome over the DevTools protocol, so it needs Node 22 or later. It skips, loudly, when not opted in or when no Chrome is found (`CHROME_BIN` picks the binary). CI runs it against Chrome for Testing with `WEBMCP_E2E_REQUIRED=1`, which turns a skip into a failure. The background relay still needs a hand check: load the extension unpacked, run `node tools/serve-demo.js`, and open the demo page.
 
+## Roadmap
+
+What is left needs someone other than this repo's code: a release, a store account, or a person in front of a real DevTools window.
+
+- A release. Everything under Unreleased in [CHANGELOG.md](CHANGELOG.md) is on main only, including the move to GPL-3.0-or-later and the lint fixes. The newest tag is still v0.2.0, and that is the version [SECURITY.md](SECURITY.md) supports. Until a new tag is cut, load main unpacked to get them.
+- The Chrome Web Store. Install is load-unpacked only for now. A listing needs a developer account and a privacy disclosure for a content script that runs on every site, and whether to list it at all is still an open decision.
+- A hand check of Copy findings as JSON in real DevTools. The tests fake the clipboard, and nobody has confirmed yet that Chrome lets an extension's DevTools panel write to it.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy
