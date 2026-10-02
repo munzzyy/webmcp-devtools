@@ -120,3 +120,15 @@ test('normalizeTool keeps a string title and defaults anything else to empty', (
   assert.equal(normalizeTool({ name: 'x' }).title, '');
   assert.equal(normalizeTool({ name: 'x', title: 5 }).title, '');
 });
+
+test('normalizeTool keeps which frame a tool came from, and reads anything unexpected as its own frame', () => {
+  const foreign = normalizeTool({ name: 'childTool', ownFrame: false, framePath: 'top.0' });
+  assert.equal(foreign.ownFrame, false);
+  assert.equal(foreign.framePath, 'top.0');
+  const legacy = normalizeTool({ name: 'old' });
+  assert.equal(legacy.ownFrame, true);
+  assert.equal(legacy.framePath, null);
+  const junk = normalizeTool({ name: 'junk', ownFrame: 'no', framePath: 7 });
+  assert.equal(junk.ownFrame, true);
+  assert.equal(junk.framePath, null);
+});

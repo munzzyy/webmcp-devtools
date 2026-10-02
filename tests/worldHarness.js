@@ -51,7 +51,10 @@ function makeWindow() {
       posted.push(data);
       for (const fn of [...listeners]) fn({ source: win, data });
     },
+    // A top-level window with no child frames, until a test adds some.
+    length: 0,
   };
+  win.parent = win;
   const dispatch = (data, source) => {
     for (const fn of [...listeners]) fn({ source, data });
   };
@@ -86,14 +89,26 @@ function runScript(file, context) {
 /**
  * Loads the real page-bridge.js against a fake MAIN world.
  * `nonce: null` skips the handshake attribute so the inert path can be tested.
+ * `nativeModelContext(win)` returns the object a native Document.prototype.modelContext
+ * getter hands out; `modelContext` is a page-installed one on the document itself.
  */
-export function loadBridge({ nonce = 'test-nonce', modelContext, navigatorModelContext } = {}) {
+export function loadBridge({ nonce = 'test-nonce', modelContext, navigatorModelContext, nativeModelContext } = {}) {
   const { win, posted } = makeWindow();
   const documentElement = new FakeDocumentElement();
   if (nonce !== null) documentElement.setAttribute('data-webmcp-devtools-nonce', nonce);
 
-  const doc = { documentElement };
-  if (modelContext !== undefined) doc.modelContext = modelContext;
+  let Document;
+  let doc;
+  if (nativeModelContext !== undefined) {
+    const native = nativeModelContext(win);
+    Document = class Document {};
+    Object.defineProperty(Document.prototype, 'modelContext', { get: () => native, enumerable: true, configurable: true });
+    doc = Object.create(Document.prototype);
+    doc.documentElement = documentElement;
+  } else {
+    doc = { documentElement };
+  }
+  if (modelContext !== undefined) Object.defineProperty(doc, 'modelContext', { value: modelContext, configurable: true, writable: true });
 
   const context = {
     window: win,
@@ -105,6 +120,7 @@ export function loadBridge({ nonce = 'test-nonce', modelContext, navigatorModelC
     Date,
     ...makeTimers(),
   };
+  if (Document) context.Document = Document;
   runScript('page-bridge.js', context);
 
   return {

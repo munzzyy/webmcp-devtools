@@ -8,6 +8,9 @@ Changes on main since [v0.2.0](https://github.com/munzzyy/webmcp-devtools/compar
 - A "Copy findings as JSON" button copies the whole audit to the clipboard. It lists every frame with its bridge health and read errors, and every tool with its full definition and findings. A frame the panel could not inspect never reads as clean.
 - Two lint rules from the webmcp-lint CLI: a tool that handles outside content without `untrustedContentHint`, and Chrome's size budgets for names and descriptions.
 - A page that freezes its tool descriptors, or makes `execute` read-only, no longer gets an error from `registerTool` just because the extension is installed. Calls to those tools still show in the timeline.
+- The panel works against Chrome's native WebMCP. Tools keep their ids across listings, and Execute sends the arguments as the JSON string native expects and shows the decoded result.
+- A page that registers a new definition under a name it already used, natively or through a polyfill, gets the high "changed after registration" finding instead of a quiet added and removed pair, and Execute waits until the tool is selected again.
+- A tool registered in one frame and listed by every frame shows up once, under the frame that registered it. A tool from a frame the extension can't reach, like a `srcdoc` iframe, is listed once and marked as coming from another frame.
 - A tool with a BigInt or a circular reference in it no longer hides the rest of its frame's tool list. It shows up with a finding that says it could not be relayed intact.
 - The linter scans every string and key in the input schema and the tool's title. It used to read only descriptions and a few other keys.
 - Closed several ways to hide text from the linter with Unicode, such as look-alike letters and invisible characters it did not know about.
@@ -19,6 +22,7 @@ Changes on main since [v0.2.0](https://github.com/munzzyy/webmcp-devtools/compar
 - The security policy names the supported tag.
 - CI tests on Node 22, 24 and 26. Node 20 reached end of life.
 - CI also runs the end-to-end test in Chrome for Testing, and a skip there fails the job.
+- A second end-to-end test runs against Chrome's native WebMCP, across a page and its iframe.
 
 ## v0.2.0 (2026-08-02)
 

@@ -24,28 +24,33 @@ const EMPTY_SCHEMA = Object.freeze({ type: 'object', properties: {} });
  *   inputSchemaError: string | null,
  *   annotations: { readOnlyHint: boolean, untrustedContentHint: boolean, [key: string]: unknown },
  *   origin: string,
+ *   ownFrame: boolean,
+ *   framePath: string | null,
  *   degraded: string[],
  * }}
  */
 export function normalizeTool(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
 
-  // Stable per-frame identity assigned by content.js (the tool's position in
-  // getTools()). Two tools with the same name -- or several "(unnamed tool)"
-  // entries -- stay distinct because the panel addresses them by toolId, not
-  // by name. Null when a caller (e.g. a unit test) provides no id.
+  // Per-frame id from page-bridge.js, never a list position. Two tools with the
+  // same name -- or several "(unnamed tool)" entries -- stay distinct because
+  // the panel addresses them by toolId, not by name. Null when a caller (e.g.
+  // a unit test) provides no id.
   const toolId = typeof src.toolId === 'string' ? src.toolId : null;
   const name = typeof src.name === 'string' && src.name.length > 0 ? src.name : '(unnamed tool)';
   const title = typeof src.title === 'string' ? src.title : '';
   const description = typeof src.description === 'string' ? src.description : '';
   const origin = typeof src.origin === 'string' ? src.origin : '';
+  // False when another frame registered the tool and this frame's getTools() only lists it.
+  const ownFrame = src.ownFrame !== false;
+  const framePath = typeof src.framePath === 'string' ? src.framePath : null;
 
   const { inputSchema, inputSchemaError } = parseInputSchema(src.inputSchema);
   const annotations = normalizeAnnotations(src.annotations);
 
   const degraded = normalizeDegraded(src.degraded);
 
-  return { toolId, name, title, description, inputSchema, inputSchemaError, annotations, origin, degraded };
+  return { toolId, name, title, description, inputSchema, inputSchemaError, annotations, origin, ownFrame, framePath, degraded };
 }
 
 // Fields page-bridge.js had to send as a lossy copy to get them across the Port.

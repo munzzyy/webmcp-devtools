@@ -4,9 +4,10 @@
 // in a real Chrome sees a page-installed document.modelContext across the
 // isolated-world boundary, that the manifest injection order delivers the
 // nonce handshake before any page script runs, and that the relay actually
-// crosses worlds. Loads the real extension (plus read-only probe scripts)
-// into headless Chromium against tests/fixtures/registertool-page.html, which
-// registers tools via document.modelContext.registerTool.
+// crosses worlds. Loads the real extension (plus probe scripts) into headless
+// Chromium against tests/fixtures/registertool-page.html, which registers
+// tools via document.modelContext.registerTool, and against native-page.html,
+// which uses Chrome's native WebMCP in a page and a same-origin iframe.
 // Driven over CDP (Node 22+), because --dump-dom never returns in Chrome for Testing 154.
 //
 // Opt-in and loud about it: run with
@@ -94,7 +95,39 @@ const PORT_PROBE_JS = `(() => {
 })();
 `;
 
-function buildHarnessExtension(tmp) {
+// Records each tools message and executeResult as JSON, and once forges an executeTool for
+// getBalance with the nonce read off a bridge message, the way any page script could.
+const NATIVE_PROBE_JS = `(() => {
+  let forged = false;
+  const record = (text) => {
+    const el = document.createElement('div');
+    el.className = 'e2e-native-msg';
+    el.textContent = text;
+    (document.body || document.documentElement).appendChild(el);
+  };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || typeof d !== 'object' || d.webmcpDevtools !== 'bridge') return;
+    if (d.type === 'tools' && Array.isArray(d.tools)) {
+      record('tools|' + JSON.stringify(d.tools.map((t) => ({ name: t.name, toolId: t.toolId, ownFrame: t.ownFrame, framePath: t.framePath }))));
+      const target = d.tools.find((t) => t.name === 'getBalance' && t.ownFrame === true);
+      if (target && !forged) {
+        forged = true;
+        window.postMessage({
+          webmcpDevtools: 'content', nonce: d.nonce, type: 'executeTool', callId: 'e2e-forged',
+          toolId: target.toolId, toolName: 'getBalance', argsJson: '{"account":"main"}',
+        }, '*');
+      }
+    }
+    if (d.type === 'executeResult') {
+      record('exec|' + JSON.stringify({ ok: d.ok, result: d.result === undefined ? null : d.result, error: d.error || null }));
+    }
+  });
+})();
+`;
+
+function buildHarnessExtension(tmp, { native = false } = {}) {
   const ext = path.join(tmp, 'ext');
   mkdirSync(ext);
   const manifest = JSON.parse(readFileSync(path.join(repo, 'manifest.json'), 'utf8'));
@@ -106,13 +139,14 @@ function buildHarnessExtension(tmp) {
   });
   manifest.content_scripts.push({
     matches: ['<all_urls>'],
-    js: ['probe.js'],
+    js: native ? ['probe.js', 'native-probe.js'] : ['probe.js'],
     all_frames: true,
     run_at: 'document_start',
   });
   writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest, null, 2));
   writeFileSync(path.join(ext, 'probe.js'), PROBE_JS);
   writeFileSync(path.join(ext, 'port-probe.js'), PORT_PROBE_JS);
+  if (native) writeFileSync(path.join(ext, 'native-probe.js'), NATIVE_PROBE_JS);
   for (const file of ['content.js', 'page-bridge.js', 'background.js', 'devtools.html', 'devtools.js']) {
     copyFileSync(path.join(repo, file), path.join(ext, file));
   }
@@ -225,8 +259,8 @@ function removeQuietly(t, dir) {
   }
 }
 
-// Returns the page's HTML once settled(html) holds, or whatever it has at the deadline.
-async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
+// Opens url in Chrome with the harness extension and hands drive() the page and its deadline.
+async function withChromePage(chrome, tmp, ext, url, featureFlag, drive, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   const profile = path.join(tmp, 'profile');
   const child = spawn(chrome, [
@@ -236,8 +270,7 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
     '--no-default-browser-check',
     `--user-data-dir=${profile}`,
     `--load-extension=${ext}`,
-    // Chrome 154 enables native WebMCP by default; this test is about the page's own.
-    '--disable-features=WebMCP',
+    featureFlag,
     '--remote-debugging-port=0',
     'about:blank',
   ], { stdio: 'ignore', detached: true });
@@ -265,14 +298,11 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
     const devtools = await connectDevTools(page.webSocketDebuggerUrl);
     try {
       await devtools.send('Page.navigate', { url });
-      let html = '';
-      while (Date.now() < deadline) {
-        const { result } = await devtools.send('Runtime.evaluate', { expression: 'document.documentElement.outerHTML', returnByValue: true });
-        html = result && typeof result.value === 'string' ? result.value : '';
-        if (settled(html)) break;
-        await sleep(200);
-      }
-      return html;
+      const evaluate = async (expression) => {
+        const { result } = await devtools.send('Runtime.evaluate', { expression, returnByValue: true });
+        return result ? result.value : undefined;
+      };
+      return await drive(evaluate, deadline);
     } finally {
       devtools.close();
     }
@@ -281,25 +311,44 @@ async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
   }
 }
 
+// Returns the page's HTML once settled(html) holds, or whatever it has at the deadline.
+function loadInChrome(chrome, tmp, ext, url, settled) {
+  // Chrome 154 enables native WebMCP by default; this test is about the page's own.
+  return withChromePage(chrome, tmp, ext, url, '--disable-features=WebMCP', async (evaluate, deadline) => {
+    let html = '';
+    while (Date.now() < deadline) {
+      const value = await evaluate('document.documentElement.outerHTML');
+      html = typeof value === 'string' ? value : '';
+      if (settled(html)) break;
+      await sleep(200);
+    }
+    return html;
+  });
+}
+
 function skipOrFail(t, reason) {
   if (process.env.WEBMCP_E2E_REQUIRED === '1') assert.fail(`${reason} (and WEBMCP_E2E_REQUIRED=1)`);
   t.skip(reason);
 }
 
-test('MAIN-world bridge sees a page-installed modelContext in real Chrome', async (t) => {
+// Returns a Chrome binary, or null after skipping (or failing, when required) with the reason.
+function e2eChrome(t) {
   if (process.env.WEBMCP_E2E !== '1') {
     skipOrFail(t, 'e2e did not run: set WEBMCP_E2E=1 to load the extension into headless Chrome');
-    return;
+    return null;
   }
   if (typeof WebSocket !== 'function') {
     skipOrFail(t, 'e2e did not run: it needs the built-in WebSocket of Node 22 or later');
-    return;
+    return null;
   }
   const chrome = findChrome();
-  if (!chrome) {
-    skipOrFail(t, 'e2e did not run: no Chrome/Chromium binary found (set CHROME_BIN)');
-    return;
-  }
+  if (!chrome) skipOrFail(t, 'e2e did not run: no Chrome/Chromium binary found (set CHROME_BIN)');
+  return chrome;
+}
+
+test('MAIN-world bridge sees a page-installed modelContext in real Chrome', async (t) => {
+  const chrome = e2eChrome(t);
+  if (!chrome) return;
 
   const tmp = mkdtempSync(path.join(tmpdir(), 'webmcp-e2e-'));
   const { server, port } = await serveFixtures();
@@ -335,6 +384,90 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*tallyItems/.test(dom), 'tallyItems never reached the Port in a tools message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*frozenTool/.test(dom), 'the frozen descriptor never registered' + seen);
+  } finally {
+    server.close();
+    removeQuietly(t, tmp);
+  }
+});
+
+const NATIVE_CHECK = `(() => {
+  const desc = Object.getOwnPropertyDescriptor(Document.prototype, 'modelContext');
+  return !!(desc && typeof desc.get === 'function' && document.modelContext && desc.get.call(document) === document.modelContext);
+})()`;
+
+const nativeMessages = (frameExpr) => `(() => {
+  const doc = ${frameExpr};
+  return doc ? [...doc.querySelectorAll('.e2e-native-msg')].map((el) => el.textContent) : [];
+})()`;
+
+const parseMessages = (texts, kind) => (texts || [])
+  .filter((text) => text.startsWith(`${kind}|`))
+  .map((text) => JSON.parse(text.slice(kind.length + 1)));
+
+const listsAll = (list, names) => names.every((name) => list.some((tool) => tool.name === name));
+
+test('the bridge works against Chrome\'s native WebMCP across frames', async (t) => {
+  const chrome = e2eChrome(t);
+  if (!chrome) return;
+
+  const tmp = mkdtempSync(path.join(tmpdir(), 'webmcp-e2e-'));
+  const { server, port } = await serveFixtures();
+  try {
+    const ext = buildHarnessExtension(tmp, { native: true });
+    const url = `http://127.0.0.1:${port}/native-page.html`;
+    // Chromium 153 needs the testing flag; Chrome 154 and later have native WebMCP on by default.
+    const seen = await withChromePage(chrome, tmp, ext, url, '--enable-features=WebMCPTesting', async (evaluate, deadline) => {
+      let state = { native: null, top: [], child: [] };
+      while (Date.now() < deadline) {
+        state = {
+          native: await evaluate(NATIVE_CHECK),
+          top: await evaluate(nativeMessages('document')),
+          child: await evaluate(nativeMessages("document.getElementById('child') && document.getElementById('child').contentDocument")),
+          ports: await evaluate("[...document.querySelectorAll('.e2e-port-msg')].map((el) => el.textContent)"),
+        };
+        if (state.native === false) return state;
+        const done = parseMessages(state.top, 'exec').length > 0
+          && parseMessages(state.top, 'tools').some((list) => listsAll(list, ['childTool', 'lateTool']))
+          && parseMessages(state.child, 'tools').some((list) => listsAll(list, ['childTool', 'getBalance']));
+        if (done) return state;
+        await sleep(200);
+      }
+      return state;
+    });
+
+    if (seen.native === false) {
+      skipOrFail(t, 'e2e did not run: this Chrome has no native WebMCP (document.modelContext is not its own ModelContext)');
+      return;
+    }
+    const dump = `\nmessages seen:\n${JSON.stringify(seen, null, 1)}`;
+    const topLists = parseMessages(seen.top, 'tools');
+    const childLists = parseMessages(seen.child, 'tools');
+
+    // Native getTools() returns fresh objects every call; the id must not follow them.
+    const balanceIds = topLists.map((list) => list.find((tool) => tool.name === 'getBalance')).filter(Boolean).map((tool) => tool.toolId);
+    assert.ok(balanceIds.length >= 2, 'getBalance was listed fewer than twice' + dump);
+    assert.equal(new Set(balanceIds).size, 1, `getBalance changed ids: ${balanceIds.join(', ')}` + dump);
+
+    const byName = (list) => Object.fromEntries(list.map((tool) => [tool.name, tool]));
+    const topList = topLists.find((list) => listsAll(list, ['childTool', 'lateTool']));
+    assert.ok(topList, 'the top frame never listed childTool and lateTool together' + dump);
+    const top = byName(topList);
+    assert.deepEqual([top.getBalance?.ownFrame, top.getBalance?.framePath], [true, 'top'], 'getBalance in the top frame' + dump);
+    assert.deepEqual([top.frozenTool?.ownFrame, top.frozenTool?.framePath], [true, 'top'], 'the frozen descriptor in the top frame' + dump);
+    assert.deepEqual([top.childTool?.ownFrame, top.childTool?.framePath], [false, 'top.0'], 'childTool as the top frame lists it' + dump);
+
+    const childList = childLists.find((list) => listsAll(list, ['childTool', 'getBalance']));
+    assert.ok(childList, 'the child frame never listed childTool and getBalance together' + dump);
+    const child = byName(childList);
+    assert.deepEqual([child.childTool?.ownFrame, child.childTool?.framePath], [true, 'top.0'], 'childTool in its own frame' + dump);
+    assert.deepEqual([child.getBalance?.ownFrame, child.getBalance?.framePath], [false, 'top'], 'getBalance as the child frame lists it' + dump);
+
+    const [exec] = parseMessages(seen.top, 'exec');
+    assert.equal(exec.ok, true, 'the forged executeTool failed' + dump);
+    assert.deepEqual(exec.result, { cents: 1200, account: 'main' });
+
+    const throws = (seen.ports || []).filter((text) => text.startsWith('E2EPORT|THROW'));
+    assert.deepEqual(throws, [], 'the Port refused a message' + dump);
   } finally {
     server.close();
     removeQuietly(t, tmp);

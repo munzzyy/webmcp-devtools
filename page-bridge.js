@@ -37,14 +37,14 @@
   const POLL_INTERVAL_MS = 500;
   const POLL_MAX_MS = 30000;
   const REWRAP_WATCH_MS = 2000;
+  const MAX_FRAME_DEPTH = 32;
+  const MAX_SIBLING_FRAMES = 1000;
 
-  // Stable identity across re-enumeration: a registry-backed implementation
-  // returns the same live tool objects from every getTools() call, so keying
-  // ids on object identity (not position) keeps a tool's id fixed while other
-  // tools register and unregister around it. Positional ids renumbered every
-  // toolchange, which silently re-pointed the panel's selection at a
-  // different tool -- and could execute it.
-  const toolIds = new WeakMap();
+  // Ids never follow list position: a positional id re-pointed the panel's selection, and Execute, at a different tool.
+  const toolIds = new WeakMap(); // live tool object -> toolId
+  // Native getTools() returns fresh objects on every call, so those key on the (window, name) pair native executeTool resolves by.
+  const idsByWindow = new WeakMap(); // tool.window, or OWN_WINDOW -> Map(name -> toolId)
+  const OWN_WINDOW = {};
   let nextToolId = 1;
   let toolCache = new Map(); // toolId -> live tool object
 
@@ -55,6 +55,25 @@
   const trackedRegistrations = []; // descriptors seen via registerTool, for getTools-less builds
   let panelCallDepth = 0; // panel-initiated executions report via executeResult, not observedCall
   let handlerSuppressDepth = 0; // an observed executeTool call must not double-log via the handler wrapper
+
+  // Read before any page script runs, so a page cannot pass its own object off as native.
+  const nativeModelContextGetter = (() => {
+    try {
+      const desc = Object.getOwnPropertyDescriptor(Document.prototype, 'modelContext');
+      return desc && typeof desc.get === 'function' ? desc.get : null;
+    } catch (err) {
+      return null;
+    }
+  })();
+
+  function isNativeModelContext(mc) {
+    if (!nativeModelContextGetter) return false;
+    try {
+      return nativeModelContextGetter.call(document) === mc;
+    } catch (err) {
+      return false;
+    }
+  }
 
   function post(msg) {
     try {
@@ -130,10 +149,15 @@
         }
         const nextCache = new Map();
         const projected = [];
+        const taken = new Set();
+        const paths = new Map();
         for (const raw of rawTools) {
-          const toolId = idFor(raw);
+          const toolId = idFor(raw, taken);
           nextCache.set(toolId, raw);
-          projected.push(projectTool(raw, toolId, 'getTools'));
+          const win = toolWindow(raw);
+          const own = win === null || win === window;
+          if (!paths.has(win)) paths.set(win, framePath(own ? window : win));
+          projected.push(projectTool(raw, toolId, 'getTools', own, paths.get(win)));
         }
         toolCache = nextCache;
         post({ type: 'tools', origin: safeOrigin(), hasModelContext: true, tools: projected });
@@ -148,34 +172,108 @@
     // before the bridge installed is invisible, which the status message says.
     const nextCache = new Map();
     const projected = [];
+    const taken = new Set();
+    const ownPath = framePath(window);
     for (const desc of trackedRegistrations) {
-      const toolId = idFor(desc);
+      const toolId = idFor(desc, taken);
       nextCache.set(toolId, desc);
-      projected.push(projectTool(desc, toolId, 'registerTool'));
+      projected.push(projectTool(desc, toolId, 'registerTool', true, ownPath));
     }
     toolCache = nextCache;
     post({ type: 'tools', origin: safeOrigin(), hasModelContext: true, tools: projected });
   }
 
-  function idFor(raw) {
-    if (!raw || (typeof raw !== 'object' && typeof raw !== 'function')) {
-      nextToolId += 1;
-      return `t${nextToolId - 1}`;
+  // `taken` holds the ids this listing already gave out; unnamed tools and a repeated pair fall back to object identity.
+  function idFor(raw, taken) {
+    let id;
+    if (raw && (typeof raw === 'object' || typeof raw === 'function')) {
+      id = toolIds.get(raw);
+      if (id === undefined || taken.has(id)) {
+        const name = toolName(raw);
+        id = name === null ? undefined : idForPair(toolWindow(raw), name);
+        if (id === undefined || taken.has(id)) id = mintId();
+        toolIds.set(raw, id);
+      }
+    } else {
+      id = mintId();
     }
-    let id = toolIds.get(raw);
+    taken.add(id);
+    return id;
+  }
+
+  function idForPair(win, name) {
+    const scope = win === null || win === window ? OWN_WINDOW : win;
+    let byName = idsByWindow.get(scope);
+    if (!byName) {
+      byName = new Map();
+      idsByWindow.set(scope, byName);
+    }
+    let id = byName.get(name);
     if (id === undefined) {
-      id = `t${nextToolId}`;
-      nextToolId += 1;
-      toolIds.set(raw, id);
+      id = mintId();
+      byName.set(name, id);
     }
     return id;
+  }
+
+  function mintId() {
+    const id = `t${nextToolId}`;
+    nextToolId += 1;
+    return id;
+  }
+
+  function toolName(raw) {
+    try {
+      const name = raw.name;
+      return typeof name === 'string' && name !== '' ? name : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Native tools carry the window that registered them; polyfill tools usually carry none.
+  function toolWindow(raw) {
+    try {
+      const win = raw.window;
+      return win !== null && typeof win === 'object' ? win : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Child-frame indexes from the top window ("top.0.1"), the same string whichever frame works it out.
+  function framePath(win) {
+    try {
+      const steps = [];
+      let w = win;
+      for (let depth = 0; depth < MAX_FRAME_DEPTH; depth += 1) {
+        const parent = w.parent;
+        if (parent === w) return ['top', ...steps.reverse()].join('.');
+        if (!parent) return null;
+        const count = parent.length;
+        if (typeof count !== 'number' || count > MAX_SIBLING_FRAMES) return null;
+        let index = -1;
+        for (let i = 0; i < count; i += 1) {
+          if (parent[i] === w) {
+            index = i;
+            break;
+          }
+        }
+        if (index === -1) return null;
+        steps.push(index);
+        w = parent;
+      }
+      return null;
+    } catch (err) {
+      return null;
+    }
   }
 
   // Strips non-cloneable/live fields and otherwise leaves the tool exactly as
   // the page provided it. Parsing/normalization happens in the panel via
   // core/normalizeTool.js so that logic stays in one pure, unit-tested place.
   // `degraded` names the fields sent as a lossy copy.
-  function projectTool(raw, toolId, via) {
+  function projectTool(raw, toolId, via, ownFrame, path) {
     const src = raw && typeof raw === 'object' ? raw : {};
     const degraded = [];
     const field = (key) => {
@@ -193,6 +291,8 @@
       inputSchema: field('inputSchema'),
       annotations: field('annotations'),
       origin: typeof src.origin === 'string' ? src.origin : safeOrigin(),
+      ownFrame,
+      framePath: path,
     };
     if (degraded.length > 0) projection.degraded = degraded;
     return projection;
@@ -373,9 +473,10 @@
     handlerSuppressDepth += 1;
     try {
       const result = await original.apply(mc, args);
+      const shown = isNativeModelContext(mc) ? decodeNativeResult(result) : result;
       post({
         type: 'observedCall', origin: safeOrigin(), initiator: 'page', toolName,
-        argsJson: lossyJson(args[1]), ok: true, result: toCloneable(result), timestamp,
+        argsJson: lossyJson(args[1]), ok: true, result: toCloneable(shown), timestamp,
       });
       return result;
     } catch (err) {
@@ -432,10 +533,11 @@
     // over an object. Legacy shims that JSON.parse the argument themselves
     // get one retry with the raw string, keyed to TypeError -- the error a
     // WebIDL surface raises on a wrong argument type before running anything.
+    const argsText = typeof argsJson === 'string' && argsJson.trim() !== '' ? argsJson : '{}';
     let argsValue;
     let argsParsed = false;
     try {
-      argsValue = JSON.parse(typeof argsJson === 'string' && argsJson.trim() !== '' ? argsJson : '{}');
+      argsValue = JSON.parse(argsText);
       argsParsed = true;
     } catch (err) {
       argsValue = argsJson;
@@ -444,7 +546,10 @@
     panelCallDepth += 1;
     try {
       let result;
-      if (typeof doc.executeTool === 'function') {
+      if (typeof doc.executeTool === 'function' && isNativeModelContext(doc)) {
+        // Native takes only a JSON string, and a handler that throws rejects with the same UnknownError as bad arguments, so never retry.
+        result = decodeNativeResult(await doc.executeTool(tool, argsText));
+      } else if (typeof doc.executeTool === 'function') {
         try {
           result = await doc.executeTool(tool, argsValue);
         } catch (err) {
@@ -464,6 +569,16 @@
       fail(describeError(err));
     } finally {
       panelCallDepth -= 1;
+    }
+  }
+
+  // Native executeTool resolves to the handler's result as a JSON string. Polyfill results are never decoded, so a string stays a string.
+  function decodeNativeResult(value) {
+    if (typeof value !== 'string') return value;
+    try {
+      return JSON.parse(value);
+    } catch (err) {
+      return value;
     }
   }
 

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>webmcp-devtools e2e fixture: native WebMCP child frame</title>
+  </head>
+  <body>
+    <script>
+      // The parent's getTools() lists this tool too, so the parent's bridge must tag it as another frame's.
+      if (document.modelContext && typeof document.modelContext.registerTool === 'function') {
+        document.modelContext.registerTool({
+          name: 'childTool',
+          description: 'A tool the child frame registers.',
+          inputSchema: { type: 'object', properties: {} },
+          async execute() {
+            return { child: true };
+          },
+        });
+      }
+    </script>
+  </body>
+</html>

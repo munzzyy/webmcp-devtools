@@ -7,9 +7,10 @@
 // an already-reviewed tool for the agent while the human looks away. Static
 // linting cannot catch it; a diff across announcements can.
 //
-// Tools are matched by the stable toolId content.js/page-bridge.js assign
-// (live-object identity, not position), so "same id, different fields" really
-// means the page mutated a registered tool in place.
+// Tools are matched by the stable toolId page-bridge.js assigns (the live
+// object, or on native WebMCP the registering window plus the name, never the
+// position), so "same id, different fields" means the page changed a
+// registered tool, in place or by registering it again.
 
 const COMPARED_FIELDS = ['name', 'description', 'readOnlyHint', 'untrustedContentHint', 'inputSchema'];
 

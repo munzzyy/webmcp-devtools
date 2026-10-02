@@ -247,27 +247,16 @@ function upsertFrameTools(msg) {
   // description, hints, or schema change AFTER it was first announced is the
   // mid-session move a static lint can never see; record what changed, both
   // in the timeline and as a per-tool finding.
-  if (existing && existing.announcedTools && hasModelContext) {
-    const diff = diffToolLists(existing.tools, nextTools);
-    if (diff.added.length || diff.removed.length || diff.mutated.length) {
-      timelineState = timelineReducer(timelineState, {
-        type: 'toolset',
-        frameId: msg.frameId,
-        origin,
-        timestamp: Date.now(),
-        added: diff.added.map((t) => t.name),
-        removed: diff.removed.map((t) => t.name),
-        mutated: diff.mutated,
-      });
-      renderTimeline();
-      for (const m of diff.mutated) {
-        const key = `${msg.frameId}:${m.toolId}`;
-        const fields = mutatedFields.get(key) || new Set();
-        for (const field of m.fields) fields.add(field);
-        mutatedFields.set(key, fields);
-      }
-      for (const r of diff.removed) mutatedFields.delete(`${msg.frameId}:${r.toolId}`);
+  const diff = existing && existing.announcedTools && hasModelContext ? diffToolLists(existing.tools, nextTools) : null;
+  const shownBefore = diff ? shownToolKeys() : null;
+  if (diff) {
+    for (const m of diff.mutated) {
+      const key = `${msg.frameId}:${m.toolId}`;
+      const fields = mutatedFields.get(key) || new Set();
+      for (const field of m.fields) fields.add(field);
+      mutatedFields.set(key, fields);
     }
+    for (const r of diff.removed) mutatedFields.delete(`${msg.frameId}:${r.toolId}`);
   }
   if (!hasModelContext) clearFrameMutations(msg.frameId);
 
@@ -284,6 +273,27 @@ function upsertFrameTools(msg) {
     capabilities: existing ? existing.capabilities : undefined,
     observing: existing ? existing.observing : undefined,
   });
+
+  if (diff) {
+    // Only the frame a tool is shown under reports its changes, so a tool every frame lists lands in the timeline once.
+    const shownAfter = shownToolKeys();
+    const shown = (set) => (t) => set.has(`${msg.frameId}:${t.toolId}`);
+    const added = diff.added.filter(shown(shownAfter));
+    const removed = diff.removed.filter(shown(shownBefore));
+    const mutated = diff.mutated.filter(shown(shownAfter));
+    if (added.length || removed.length || mutated.length) {
+      timelineState = timelineReducer(timelineState, {
+        type: 'toolset',
+        frameId: msg.frameId,
+        origin,
+        timestamp: Date.now(),
+        added: added.map((t) => t.name),
+        removed: removed.map((t) => t.name),
+        mutated,
+      });
+      renderTimeline();
+    }
+  }
 }
 
 function clearFrameMutations(frameId) {
@@ -384,7 +394,7 @@ function statusBarItems() {
 
   const liveFrames = frames.filter((f) => f.bridge !== false);
   const anyModelContext = liveFrames.some((f) => f.hasModelContext);
-  const totalTools = liveFrames.reduce((sum, f) => sum + f.tools.length, 0);
+  const totalTools = flattenTools().length;
 
   // The spec moved the API from navigator to document mid-origin-trial, so
   // pages written against Chrome 149 may register tools only on the old
@@ -441,15 +451,43 @@ function statusBarItems() {
   return items;
 }
 
+// Native getTools() in every frame lists the other frames' tools too. Each tool shows once: under the
+// frame that owns it, or under the lowest frameId that lists it when no frame owns it (a srcdoc iframe has no bridge).
 function flattenTools() {
-  const rows = [];
-  for (const [frameId, frame] of toolsByFrame) {
+  const owned = new Set();
+  for (const frame of toolsByFrame.values()) {
     for (const tool of frame.tools) {
+      const key = placeKey(tool);
+      if (tool.ownFrame && key !== null) owned.add(key);
+    }
+  }
+  const rows = [];
+  const listed = new Set();
+  for (const frameId of [...toolsByFrame.keys()].sort(compareFrameIds)) {
+    for (const tool of toolsByFrame.get(frameId).tools) {
+      const key = tool.ownFrame ? null : placeKey(tool);
+      if (key !== null) {
+        if (owned.has(key) || listed.has(key)) continue;
+        listed.add(key);
+      }
       rows.push({ frameId, tool });
     }
   }
   rows.sort((a, b) => a.tool.name.localeCompare(b.tool.name));
   return rows;
+}
+
+// Null when the bridge could not place the tool's frame; such a tool is never hidden as a duplicate.
+function placeKey(tool) {
+  return typeof tool.framePath === 'string' ? JSON.stringify([tool.framePath, tool.origin, tool.name]) : null;
+}
+
+function shownToolKeys() {
+  return new Set(flattenTools().map(({ frameId, tool }) => `${frameId}:${tool.toolId}`));
+}
+
+function compareFrameIds(a, b) {
+  return a > b ? 1 : a < b ? -1 : 0;
 }
 
 // Memoize per tool object. renderToolsTable lints every row and renderDetail
@@ -513,7 +551,7 @@ function findingsFor(frameId, tool) {
 // Carries frame state too, so a dead bridge or a dropped connection never exports as clean.
 function copyFindingsToClipboard() {
   const frames = [...toolsByFrame.entries()]
-    .sort(([a], [b]) => (a > b ? 1 : a < b ? -1 : 0))
+    .sort(([a], [b]) => compareFrameIds(a, b))
     .map(([frameId, frame]) => ({
       frameId,
       origin: frame.origin || '',
@@ -530,6 +568,8 @@ function copyFindingsToClipboard() {
         description: tool.description,
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
+        ownFrame: tool.ownFrame,
+        framePath: tool.framePath,
         findings: findingsFor(frameId, tool),
       })),
     }));
@@ -598,12 +638,13 @@ function fillToolRow(tr, frameId, tool) {
 
   const ro = tool.annotations.readOnlyHint ? 'yes' : 'no';
   const uc = tool.annotations.untrustedContentHint ? 'yes' : 'no';
-  const signature = JSON.stringify([tool.name, tool.origin || '', ro, uc, worst || '']);
+  const origin = tool.ownFrame ? tool.origin || '' : `${tool.origin ? `${tool.origin} ` : ''}(from another frame)`;
+  const signature = JSON.stringify([tool.name, origin, ro, uc, worst || '']);
   if (rowContent.get(tr) === signature) return;
   rowContent.set(tr, signature);
   clear(tr);
   tr.appendChild(h('td', { text: tool.name }));
-  tr.appendChild(h('td', { text: tool.origin || '' }));
+  tr.appendChild(h('td', { text: origin }));
   tr.appendChild(h('td', { text: ro }));
   tr.appendChild(h('td', { text: uc }));
   tr.appendChild(h('td', {}, [severityBadge(worst)]));

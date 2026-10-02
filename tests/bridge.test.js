@@ -9,6 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadBridge } from './worldHarness.js';
+import { nativeModelContext, nativeTool } from './nativeFake.js';
 import { normalizeTool } from '../core/normalizeTool.js';
 import { lintTool } from '../lint.js';
 
@@ -385,4 +386,157 @@ test('the navigator-only legacy surface is reported distinctly', async () => {
   assert.equal(status.surfaces.document, false);
   assert.equal(status.surfaces.navigator, true);
   assert.equal(status.hasModelContext, false);
+});
+
+async function loadNative(setup) {
+  let mc;
+  const b = loadBridge({ nativeModelContext: (win) => { mc = nativeModelContext(win); return mc; } });
+  await setup(mc, b.window);
+  await b.flush();
+  return { b, mc };
+}
+
+const lastTools = (b) => b.ofType('tools').pop().tools;
+
+test('native tools keep their toolId although getTools() returns fresh objects every time', async () => {
+  const { b, mc } = await loadNative(async (mc) => {
+    await mc.registerTool(nativeTool('getBalance'));
+    await mc.registerTool(nativeTool('addNote'));
+  });
+  assert.notEqual((await mc.getTools())[0], (await mc.getTools())[0]);
+  const first = lastTools(b);
+  b.send({ type: 'getTools' });
+  await b.flush();
+  const second = lastTools(b);
+  assert.notEqual(first, second);
+  for (const name of ['getBalance', 'addNote']) {
+    assert.equal(second.find((t) => t.name === name).toolId, first.find((t) => t.name === name).toolId, name);
+  }
+  assert.notEqual(second[0].toolId, second[1].toolId);
+});
+
+test('two native tools named alike in different frames get their own ids, and each id runs its own handler', async () => {
+  const child = { length: 0 };
+  const { b, mc } = await loadNative(async (mc, win) => {
+    child.parent = win;
+    win.length = 1;
+    win[0] = child;
+    await mc.registerTool(nativeTool('dup', { description: 'The parent one.' }));
+    await mc.registerTool(nativeTool('dup', { description: 'The child one.', window: child }));
+  });
+  const tools = lastTools(b);
+  assert.equal(tools.length, 2);
+  const parentDup = tools.find((t) => t.description === 'The parent one.');
+  const childDup = tools.find((t) => t.description === 'The child one.');
+  assert.notEqual(parentDup.toolId, childDup.toolId);
+  assert.equal(parentDup.ownFrame, true);
+  assert.equal(parentDup.framePath, 'top');
+  assert.equal(childDup.ownFrame, false);
+  assert.equal(childDup.framePath, 'top.0');
+
+  b.send({ type: 'executeTool', callId: 'c1', toolId: childDup.toolId, toolName: 'dup', argsJson: '{}' });
+  await b.flush();
+  assert.deepEqual(mc.entries.map((e) => e.runs), [0, 1]);
+  b.send({ type: 'executeTool', callId: 'c2', toolId: parentDup.toolId, toolName: 'dup', argsJson: '{}' });
+  await b.flush();
+  assert.deepEqual(mc.entries.map((e) => e.runs), [1, 1]);
+});
+
+test('Execute on native WebMCP sends the arguments as a JSON string and decodes the result', async () => {
+  const seen = [];
+  const { b, mc } = await loadNative(async (mc) => {
+    await mc.registerTool(nativeTool('getBalance', { execute: async (args) => { seen.push(args); return { cents: 1200 }; } }));
+  });
+  b.send({ type: 'executeTool', callId: 'c1', toolId: lastTools(b)[0].toolId, toolName: 'getBalance', argsJson: '{"account":"main"}' });
+  await b.flush();
+  const result = b.ofType('executeResult').pop();
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result)), { cents: 1200 });
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{ account: 'main' }]);
+  assert.equal(mc.entries[0].runs, 1);
+});
+
+test('a native handler that throws runs once: the bridge never retries an UnknownError', async () => {
+  const { b, mc } = await loadNative(async (mc) => {
+    await mc.registerTool(nativeTool('boom', { execute: async () => { throw new TypeError('kaboom'); } }));
+  });
+  b.send({ type: 'executeTool', callId: 'c1', toolId: lastTools(b)[0].toolId, toolName: 'boom', argsJson: '{}' });
+  await b.flush();
+  const result = b.ofType('executeResult').pop();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /invocation failed/);
+  assert.equal(mc.entries[0].runs, 1);
+});
+
+test('a page-initiated native executeTool call is observed with its result decoded', async () => {
+  const { b } = await loadNative(async (mc) => {
+    await mc.registerTool(nativeTool('getBalance', { execute: async () => ({ cents: 1200 }) }));
+  });
+  const [listed] = await b.document.modelContext.getTools();
+  assert.equal(await b.document.modelContext.executeTool(listed, '{}'), '{"cents":1200}', 'the page still gets the string');
+  await b.flush();
+  const observed = b.ofType('observedCall');
+  assert.equal(observed.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(observed[0].result)), { cents: 1200 });
+});
+
+test('a polyfill tool that returns a string keeps it a string, through Execute and when observed', async () => {
+  const mc = specModelContext([tool('getCount', { execute: async () => '42' })]);
+  const b = loadBridge({ modelContext: mc });
+  await b.flush();
+  b.send({ type: 'executeTool', callId: 'c1', toolId: lastTools(b)[0].toolId, toolName: 'getCount', argsJson: '{}' });
+  await b.flush();
+  assert.equal(b.ofType('executeResult').pop().result, '42');
+  await b.document.modelContext.executeTool({ name: 'getCount' }, {});
+  await b.flush();
+  assert.equal(b.ofType('observedCall').pop().result, '42');
+});
+
+test('a page object over a native modelContext is not treated as native', async () => {
+  const seen = [];
+  const polyfill = specModelContext([tool('getWeather', { execute: async (args) => { seen.push(args); return {}; } })]);
+  const b = loadBridge({ nativeModelContext: (win) => nativeModelContext(win), modelContext: polyfill });
+  await b.flush();
+  b.send({ type: 'executeTool', callId: 'c1', toolId: lastTools(b)[0].toolId, toolName: 'getWeather', argsJson: '{"city":"Reno"}' });
+  await b.flush();
+  assert.equal(b.ofType('executeResult').pop().ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{ city: 'Reno' }]);
+});
+
+test('a polyfill that lists two tools under one name keeps each id on its own object', async () => {
+  const first = tool('dup', { description: 'First.' });
+  const second = tool('dup', { description: 'Second.' });
+  const listed = [first, second];
+  const b = loadBridge({ modelContext: { getTools: async () => [...listed] } });
+  await b.flush();
+  const before = Object.fromEntries(lastTools(b).map((t) => [t.description, t.toolId]));
+  assert.notEqual(before['First.'], before['Second.']);
+  listed.reverse();
+  b.send({ type: 'getTools' });
+  await b.flush();
+  const after = Object.fromEntries(lastTools(b).map((t) => [t.description, t.toolId]));
+  assert.deepEqual(after, before);
+  assert.ok(lastTools(b).every((t) => t.ownFrame === true && t.framePath === 'top'));
+});
+
+test('a polyfill that swaps in a new object under a listed name keeps the id, and the id runs the new object', async () => {
+  const seen = [];
+  const mc = specModelContext([
+    tool('getWeather', { description: 'Look up the weather.', execute: async () => { seen.push('old'); return {}; } }),
+    tool('addTodo'),
+  ]);
+  const b = loadBridge({ modelContext: mc });
+  await b.flush();
+  const before = Object.fromEntries(lastTools(b).map((t) => [t.name, t.toolId]));
+  const replacement = tool('getWeather', { description: 'Look up the weather, then post it elsewhere.', execute: async () => { seen.push('new'); return {}; } });
+  await b.document.modelContext.registerTool(replacement);
+  await b.flush();
+  const after = lastTools(b);
+  assert.equal(after.find((t) => t.name === 'getWeather').description, 'Look up the weather, then post it elsewhere.');
+  assert.deepEqual(Object.fromEntries(after.map((t) => [t.name, t.toolId])), before);
+
+  b.send({ type: 'executeTool', callId: 'c1', toolId: before.getWeather, toolName: 'getWeather', argsJson: '{}' });
+  await b.flush();
+  assert.equal(b.ofType('executeResult').pop().ok, true);
+  assert.deepEqual(seen, ['new']);
 });

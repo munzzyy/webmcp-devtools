@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>webmcp-devtools e2e fixture: native WebMCP page</title>
+  </head>
+  <body>
+    <h1>native WebMCP fixture page</h1>
+    <p id="status">registering…</p>
+    <script>
+      // Chrome's own document.modelContext: no polyfill on this page. Native
+      // registerTool rejects a string inputSchema, so every schema is an object.
+      (() => {
+        const mc = document.modelContext;
+        if (!mc || typeof mc.registerTool !== 'function') {
+          document.getElementById('status').textContent = 'no native modelContext';
+          return;
+        }
+        mc.registerTool({
+          name: 'getBalance',
+          description: 'Read the balance of a demo account.',
+          inputSchema: { type: 'object', properties: { account: { type: 'string', maxLength: 20 } } },
+          annotations: { readOnlyHint: true },
+          async execute(args) {
+            return { cents: 1200, account: args && args.account };
+          },
+        });
+        // The bridge wraps registerTool before this script runs, so this goes through the wrapper.
+        mc.registerTool(Object.freeze({
+          name: 'frozenTool',
+          description: 'A tool whose descriptor the page froze.',
+          inputSchema: { type: 'object', properties: {} },
+          annotations: { readOnlyHint: true },
+          async execute() {
+            return { frozen: true };
+          },
+        }));
+        // A later registration, so the frame lists getBalance again after the iframe is up.
+        setTimeout(() => {
+          mc.registerTool({
+            name: 'lateTool',
+            description: 'Registered a moment after load.',
+            inputSchema: { type: 'object', properties: {} },
+            async execute() {
+              return { late: true };
+            },
+          });
+        }, 800);
+        document.getElementById('status').textContent = 'registered';
+      })();
+    </script>
+    <iframe id="child" src="native-child.html" title="child frame"></iframe>
+  </body>
+</html>
