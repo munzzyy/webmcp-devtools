@@ -94,6 +94,30 @@ test('a tools message the Port cannot serialize becomes a loud read error, not s
   assert.ok(sent[0].error.includes('Could not serialize message.'), sent[0].error);
 });
 
+test('an inherited toJSON cannot mask a BigInt and blank the frame at the Port', async () => {
+  const masked = Object.create({ toJSON() { return { type: 'object' }; } });
+  masked.type = 'object';
+  masked.properties = { n: { type: 'integer', default: 1n } };
+  const raw = [
+    { name: 'getWeather', description: 'd', inputSchema: {} },
+    { name: 'masked', description: 'd', inputSchema: masked },
+  ];
+  const b = loadBridge({ modelContext: { async getTools() { return raw; } } });
+  await b.flush();
+  const { webmcpDevtools, nonce, ...toolsMsg } = b.ofType('tools').pop();
+
+  const c = loadContent();
+  // window.postMessage hands content.js a structured clone, without the prototype.
+  c.postAsBridge(structuredClone(toolsMsg), { nonce: c.nonce });
+  const sent = c.port().sent.filter((m) => m.type === 'tools');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].error, undefined, sent[0].error);
+  assert.deepEqual([...sent[0].tools.map((t) => t.name)].sort(), ['getWeather', 'masked']);
+  const projected = sent[0].tools.find((t) => t.name === 'masked');
+  assert.deepEqual([...projected.degraded], ['inputSchema']);
+  assert.equal(projected.inputSchema.properties.n.default, '1n');
+});
+
 // The real bridge's output through the real relay, the two hops it takes in Chrome.
 test('bridge output with BigInt and cyclic tools reaches the Port listing every tool', async () => {
   const looped = { type: 'object', properties: { x: { type: 'string' } } };

@@ -197,11 +197,10 @@
     return projection;
   }
 
-  // Structured clone, then the Port's JSON: one failing field would drop the whole tool list.
+  // The Port JSON-encodes the structured clone, which has lost prototypes and any inherited toJSON.
   function survivesPort(value) {
     try {
-      structuredClone(value);
-      JSON.stringify(value);
+      JSON.stringify(structuredClone(value));
       return true;
     } catch (err) {
       return false;

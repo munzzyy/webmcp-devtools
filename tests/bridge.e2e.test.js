@@ -333,6 +333,7 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     const throws = dom.match(/E2EPORT\|THROW:[^<]*/g) || [];
     assert.deepEqual(throws, [], 'the Port refused a message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);
+    assert.ok(/E2EPORT\|ok:tools:[^<:]*tallyItems/.test(dom), 'tallyItems never reached the Port in a tools message' + seen);
   } finally {
     server.close();
     removeQuietly(t, tmp);

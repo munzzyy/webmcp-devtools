@@ -59,7 +59,20 @@
             return { count: 2 };
           },
         });
-        document.getElementById('status').textContent = 'modelContext installed, 2 tools registered';
+        // An inherited toJSON hides the BigInt from JSON.stringify, not from the clone the Port encodes.
+        const maskedSchema = Object.create({ toJSON() { return { type: 'object' }; } });
+        maskedSchema.type = 'object';
+        maskedSchema.properties = { n: { type: 'integer', default: 2n } };
+        document.modelContext.registerTool({
+          name: 'tallyItems',
+          description: 'Tally the items in the demo inventory.',
+          inputSchema: maskedSchema,
+          annotations: { readOnlyHint: true },
+          async execute() {
+            return { count: 2 };
+          },
+        });
+        document.getElementById('status').textContent = 'modelContext installed, 3 tools registered';
 
         // Page-initiated call, after the bridge's 500ms detection poll has
         // had time to wrap executeTool: this is the "agent called a tool"

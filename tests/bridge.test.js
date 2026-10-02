@@ -233,6 +233,14 @@ test('a registerTool-only build (no getTools) still enumerates observed registra
   assert.equal(tools.tools[0].via, 'registerTool');
 });
 
+// JSON.stringify sees only the inherited toJSON; the structured clone the Port encodes drops it.
+function maskedBigIntSchema() {
+  const schema = Object.create({ toJSON() { return { type: 'object' }; } });
+  schema.type = 'object';
+  schema.properties = { n: { type: 'integer', default: 1n } };
+  return schema;
+}
+
 // Each must arrive JSON-safe and still listed, with the lossy field named.
 const unserializableTools = () => {
   const looped = { type: 'object', properties: { x: { type: 'string' } } };
@@ -242,6 +250,7 @@ const unserializableTools = () => {
     ['bigAnnotation', 'annotations', { annotations: { readOnlyHint: true, weight: 2n } }],
     ['bigDescription', 'description', { description: 10n }],
     ['looped', 'inputSchema', { inputSchema: looped }],
+    ['inheritedToJSON', 'inputSchema', { inputSchema: maskedBigIntSchema() }],
   ];
 };
 
