@@ -30,7 +30,10 @@
             return desc.execute(args);
           },
         });
-        document.modelContext = mc;
+        // An own property, not a plain assignment: where Chrome has a native
+        // getter-only modelContext, a classic script's assignment is
+        // silently ignored and the page would end up on the native API.
+        Object.defineProperty(document, 'modelContext', { value: mc, configurable: true, enumerable: true });
 
         // A page script trying to steal the handshake nonce must come up empty:
         // the bridge consumed the attribute before any page script ran.

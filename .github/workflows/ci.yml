@@ -22,3 +22,42 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - run: node --test
+
+  # The only test that crosses Chrome's world boundary. Branded Chrome
+  # ignores --load-extension, so this uses Chrome for Testing, fetched from
+  # its official last-known-good JSON with no third-party action.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Download Chrome for Testing (Stable)
+        run: |
+          set -euo pipefail
+          url=$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+            | node -e 'let s = ""; process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+                const stable = JSON.parse(s).channels.Stable;
+                const hit = stable.downloads.chrome.find((d) => d.platform === "linux64");
+                if (!hit) process.exit(1);
+                console.error("Chrome for Testing " + stable.version);
+                console.log(hit.url);
+              });')
+          case "$url" in
+            https://storage.googleapis.com/chrome-for-testing-public/*/linux64/chrome-linux64.zip) ;;
+            *) echo "unexpected download URL: $url" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o "$RUNNER_TEMP/chrome-linux64.zip" "$url"
+          unzip -q "$RUNNER_TEMP/chrome-linux64.zip" -d "$RUNNER_TEMP"
+          echo "CHROME_BIN=$RUNNER_TEMP/chrome-linux64/chrome" >> "$GITHUB_ENV"
+      # Ubuntu 24.04 blocks the unprivileged user namespaces Chrome's
+      # sandbox needs; this is the runner-side switch, not --no-sandbox.
+      - name: Let Chrome's sandbox start
+        run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+      - run: node --test tests/bridge.e2e.test.js
+        env:
+          WEBMCP_E2E: '1'
+          WEBMCP_E2E_REQUIRED: '1'

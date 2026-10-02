@@ -4,21 +4,27 @@
 // in a real Chrome sees a page-installed document.modelContext across the
 // isolated-world boundary, that the manifest injection order delivers the
 // nonce handshake before any page script runs, and that the relay actually
-// crosses worlds. Loads the real extension (plus a read-only probe script)
+// crosses worlds. Loads the real extension (plus read-only probe scripts)
 // into headless Chromium against tests/fixtures/registertool-page.html, which
 // registers tools via document.modelContext.registerTool.
+//
+// Chrome is driven over the DevTools protocol with Node's built-in fetch and
+// WebSocket (Node 22+), polling the page for the probes' markers. The older
+// --dump-dom run never returns in Chrome for Testing 154.
 //
 // Opt-in and loud about it: run with
 //
 //   WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js
 //
 // When the env var or a Chrome binary is missing the test SKIPS with a "did
-// not run" message -- it never silently passes.
+// not run" message -- it never silently passes. CI also sets
+// WEBMCP_E2E_REQUIRED=1, which turns any skip into a failure, so a job
+// that could not run Chrome goes red instead of green.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +49,7 @@ function findChrome() {
 }
 
 // The probe runs in the same isolated world as content.js and mirrors every
-// bridge-envelope window message into the DOM, where --dump-dom can see it.
+// bridge-envelope window message into the DOM, where the test reads it.
 // Read-only: it validates nothing and changes nothing about the extension
 // under test.
 const PROBE_JS = `window.addEventListener('message', (event) => {
@@ -141,14 +147,107 @@ function serveFixtures() {
   });
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function connectDevTools(wsUrl) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const pending = new Map();
+    let nextId = 0;
+    ws.addEventListener('message', (event) => {
+      const msg = JSON.parse(event.data);
+      const waiter = msg.id !== undefined ? pending.get(msg.id) : undefined;
+      if (!waiter) return;
+      pending.delete(msg.id);
+      if (msg.error) waiter.reject(new Error(msg.error.message));
+      else waiter.resolve(msg.result);
+    });
+    ws.addEventListener('error', () => reject(new Error('DevTools WebSocket failed')));
+    ws.addEventListener('open', () => resolve({
+      send(method, params = {}) {
+        nextId += 1;
+        const id = nextId;
+        return new Promise((res, rej) => {
+          pending.set(id, { resolve: res, reject: rej });
+          ws.send(JSON.stringify({ id, method, params }));
+        });
+      },
+      close: () => ws.close(),
+    }));
+  });
+}
+
+// Loads `url` with the harness extension and returns the page's HTML once
+// `settled(html)` holds, or whatever it has when the deadline passes.
+async function loadInChrome(chrome, tmp, ext, url, settled, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  const profile = path.join(tmp, 'profile');
+  const child = spawn(chrome, [
+    '--headless=new',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-default-browser-check',
+    `--user-data-dir=${profile}`,
+    `--load-extension=${ext}`,
+    // Chrome 154 turns native WebMCP on by default. This test is about a
+    // page-installed modelContext, so keep the native one out of the way.
+    '--disable-features=WebMCP',
+    '--remote-debugging-port=0',
+    'about:blank',
+  ], { stdio: 'ignore' });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  try {
+    const portFile = path.join(profile, 'DevToolsActivePort');
+    while (!existsSync(portFile)) {
+      if (child.exitCode !== null) throw new Error(`chrome exited with code ${child.exitCode} before DevTools came up`);
+      if (Date.now() > deadline) throw new Error('DevTools never came up');
+      await sleep(100);
+    }
+    let devtoolsPort = '';
+    while (!devtoolsPort && Date.now() < deadline) {
+      devtoolsPort = readFileSync(portFile, 'utf8').split('\n')[0].trim();
+      if (!devtoolsPort) await sleep(50);
+    }
+    const targets = await (await fetch(`http://127.0.0.1:${devtoolsPort}/json/list`)).json();
+    const page = targets.find((target) => target.type === 'page');
+    if (!page) throw new Error('no page target to drive');
+    const devtools = await connectDevTools(page.webSocketDebuggerUrl);
+    try {
+      await devtools.send('Page.navigate', { url });
+      let html = '';
+      while (Date.now() < deadline) {
+        const { result } = await devtools.send('Runtime.evaluate', { expression: 'document.documentElement.outerHTML', returnByValue: true });
+        html = result && typeof result.value === 'string' ? result.value : '';
+        if (settled(html)) break;
+        await sleep(200);
+      }
+      return html;
+    } finally {
+      devtools.close();
+    }
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL');
+    await exited;
+  }
+}
+
+function skipOrFail(t, reason) {
+  if (process.env.WEBMCP_E2E_REQUIRED === '1') assert.fail(`${reason} (and WEBMCP_E2E_REQUIRED=1)`);
+  t.skip(reason);
+}
+
 test('MAIN-world bridge sees a page-installed modelContext in real Chrome', async (t) => {
   if (process.env.WEBMCP_E2E !== '1') {
-    t.skip('e2e did not run: set WEBMCP_E2E=1 to load the extension into headless Chrome');
+    skipOrFail(t, 'e2e did not run: set WEBMCP_E2E=1 to load the extension into headless Chrome');
+    return;
+  }
+  if (typeof WebSocket !== 'function') {
+    skipOrFail(t, 'e2e did not run: it needs the built-in WebSocket of Node 22 or later');
     return;
   }
   const chrome = findChrome();
   if (!chrome) {
-    t.skip('e2e did not run: no Chrome/Chromium binary found (set CHROME_BIN)');
+    skipOrFail(t, 'e2e did not run: no Chrome/Chromium binary found (set CHROME_BIN)');
     return;
   }
 
@@ -157,47 +256,35 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
   try {
     const ext = buildHarnessExtension(tmp);
     const url = `http://127.0.0.1:${port}/registertool-page.html`;
-    // Async spawn, not spawnSync: the fixture server lives in this process,
-    // so blocking the event loop would deadlock Chrome's page load.
-    const dom = await new Promise((resolve, reject) => {
-      const child = spawn(chrome, [
-        '--headless=new',
-        '--disable-gpu',
-        `--user-data-dir=${path.join(tmp, 'profile')}`,
-        `--load-extension=${ext}`,
-        '--virtual-time-budget=6000',
-        '--dump-dom',
-        url,
-      ], { stdio: ['ignore', 'pipe', 'ignore'] });
-      let out = '';
-      const killer = setTimeout(() => child.kill('SIGKILL'), 90000);
-      child.stdout.on('data', (chunk) => { out += chunk; });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        clearTimeout(killer);
-        if (code === 0) resolve(out);
-        else reject(new Error(`chrome exited with code ${code}; captured ${out.length} bytes`));
-      });
+    // The fixture's last step registers addNote at 1.4 s. Once that tools
+    // message is on the window, give the Port side a moment to report too.
+    const windowDone = (html) => /E2E\|tools:[^<]*addNote/.test(html) && html.includes('E2E|observedCall:getInventory');
+    const dom = await loadInChrome(chrome, tmp, ext, url, (html) => {
+      if (!windowDone(html)) return false;
+      if (!windowDone.at) windowDone.at = Date.now();
+      return Date.now() - windowDone.at > 750;
     });
 
+    // Every probe marker, so a failure in CI says what did arrive.
+    const seen = `\nmarkers seen:\n${(dom.match(/E2E(?:PORT)?\|[^<]*/g) || []).join('\n')}`;
     // The handshake completed and the bridge came up.
-    assert.ok(dom.includes('E2E|bridge-ready'), 'bridge never checked in');
+    assert.ok(dom.includes('E2E|bridge-ready'), 'bridge never checked in' + seen);
     // The MAIN world saw the page's modelContext...
-    assert.ok(dom.includes('E2E|status:doc=true'), 'bridge never reported the page-installed modelContext');
+    assert.ok(dom.includes('E2E|status:doc=true'), 'bridge never reported the page-installed modelContext' + seen);
     // ...enumerated the registerTool-registered tool across the world boundary...
-    assert.ok(/E2E\|tools:[^<]*getInventory/.test(dom), 'getInventory never showed up in a tools message');
+    assert.ok(/E2E\|tools:[^<]*getInventory/.test(dom), 'getInventory never showed up in a tools message' + seen);
     // ...observed a page-initiated executeTool call...
-    assert.ok(dom.includes('E2E|observedCall:getInventory:ok'), 'the page-initiated call was not observed');
+    assert.ok(dom.includes('E2E|observedCall:getInventory:ok'), 'the page-initiated call was not observed' + seen);
     // ...and relayed the late registration's toolchange.
-    assert.ok(dom.includes('E2E|toolchange'), 'toolchange was not relayed');
-    assert.ok(/E2E\|tools:[^<]*addNote/.test(dom), 'the late-registered tool never showed up');
+    assert.ok(dom.includes('E2E|toolchange'), 'toolchange was not relayed' + seen);
+    assert.ok(/E2E\|tools:[^<]*addNote/.test(dom), 'the late-registered tool never showed up' + seen);
     // The page could not read the handshake nonce.
-    assert.ok(dom.includes('nonce-steal:null'), 'the page saw the handshake nonce');
+    assert.ok(dom.includes('nonce-steal:null'), 'the page saw the handshake nonce' + seen);
     // The tool with a BigInt default crossed the extension Port too, in a
     // tools message that still lists it, and the Port never refused one.
     const throws = dom.match(/E2EPORT\|THROW:[^<]*/g) || [];
-    assert.deepEqual(throws, [], 'the Port refused a message');
-    assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message');
+    assert.deepEqual(throws, [], 'the Port refused a message' + seen);
+    assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);
   } finally {
     server.close();
     rmSync(tmp, { recursive: true, force: true });

@@ -17,6 +17,7 @@ Changes on main since [v0.2.0](https://github.com/munzzyy/webmcp-devtools/compar
 - Keyboard focus stays in the tool table across updates. The selected row is marked with `aria-current`. Screen readers no longer hear an unchanged status bar again and again.
 - The security policy names the supported tag.
 - CI tests on Node 22, 24 and 26. Node 20 reached end of life.
+- CI also runs the end-to-end test in Chrome for Testing, and a skip there fails the job.
 
 ## v0.2.0 (2026-08-02)
 

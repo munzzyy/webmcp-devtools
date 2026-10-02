@@ -106,7 +106,7 @@ examples/demo-tools.js Metadata for those 4 sample tools, shared with tools/demo
 tools/demo-lint.js     Headless: lints the 4 sample tools with plain node, no Chrome needed
 tools/serve-demo.js    Serves examples/ on 127.0.0.1 so the demo page loads over http
 icons/                Extension + panel icons
-.github/workflows/ci.yml   node --test on Node 22, 24 and 26
+.github/workflows/ci.yml   node --test on Node 22, 24 and 26, and the e2e in Chrome for Testing
 ```
 
 ## Architecture
@@ -146,7 +146,7 @@ node --test
 
 Runs the pure `core/` unit tests, the `lint.js` security tests, and structural checks on `manifest.json`, and drives the real `panel.js`, `content.js`, and `page-bridge.js` against small fakes of exactly the DOM and `chrome.*` surface they touch (see `tests/panelHarness.js` and `tests/worldHarness.js`). Zero dependencies, Node's built-in runner only.
 
-What the fakes cannot prove is that a MAIN-world script really sees a page-installed `modelContext` across Chrome's world boundary. `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` covers that: it loads the real extension into headless Chromium against a fixture page that registers tools via `document.modelContext.registerTool` and asserts the whole relay end to end (it skips, loudly, when not opted in or when Chromium is missing). The background relay still needs a hand check: load the extension unpacked, run `node tools/serve-demo.js`, and open the demo page.
+What the fakes cannot prove is that a MAIN-world script really sees a page-installed `modelContext` across Chrome's world boundary. `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` covers that: it loads the real extension into headless Chromium against a fixture page that registers tools via `document.modelContext.registerTool` and asserts the whole relay end to end, up to what reaches the extension Port. It drives Chrome over the DevTools protocol, so it needs Node 22 or later. It skips, loudly, when not opted in or when no Chrome is found (`CHROME_BIN` picks the binary). CI runs it against Chrome for Testing with `WEBMCP_E2E_REQUIRED=1`, which turns a skip into a failure. The background relay still needs a hand check: load the extension unpacked, run `node tools/serve-demo.js`, and open the demo page.
 
 ## License
 
