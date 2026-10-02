@@ -59,7 +59,6 @@ class FakeNode {
     return this.children.some((c) => c instanceof FakeNode && c.contains(node));
   }
 
-  // Removing the focused node, or an ancestor, drops focus to the body like a real DOM.
   focus() {
     if (FakeNode.document) FakeNode.document.activeElement = this;
   }
@@ -110,6 +109,7 @@ class FakeNode {
   }
 }
 
+// Removing the focused node, or an ancestor, drops focus to the body like a real DOM.
 function blurIfInside(node) {
   const doc = FakeNode.document;
   if (doc && node instanceof FakeNode && node.contains(doc.activeElement)) doc.activeElement = doc.body;

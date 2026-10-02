@@ -396,11 +396,7 @@ export function lintTool(tool) {
   findings.push(...scanUnicode('title', titleScan));
   findings.push(...scanUnicode('description', descScan));
 
-  // Every schema string and key reaches the agent verbatim as part of the
-  // tool definition, so it gets the exact same injection and hidden-Unicode
-  // treatment as the top-level fields. Findings
-  // carry the path (e.g. inputSchema.properties.text.description); titles stay
-  // coarse so one payload repeated across ten properties dedupes to one finding.
+  // Titles stay coarse so one payload repeated across ten properties dedupes to one finding.
   const { strings: schemaStrings, truncated: schemaWalkTruncated } = collectSchemaStrings(schema, MAX_SCAN);
   const schemaFindings = [];
   for (const { path, text } of schemaStrings) {
