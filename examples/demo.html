@@ -34,7 +34,8 @@
     <p>
       This page defines <code>document.modelContext</code> itself, with a tiny inline shim, so you
       can try the WebMCP DevTools panel without a flagged Chrome build or the real
-      <code>@mcp-b/webmcp-polyfill</code> package. Open DevTools and look for the
+      <code>@mcp-b/webmcp-polyfill</code> package. If Chrome's own WebMCP is turned on, it
+      registers the same tools through that instead. Open DevTools and look for the
       <strong>WebMCP</strong> tab.
     </p>
     <p id="status">Registering tools…</p>
@@ -59,121 +60,148 @@
       // @mcp-b/webmcp-polyfill; this file re-implements only what's needed to
       // exercise the panel end to end.
       //
+      // With chrome://flags/#enable-webmcp-testing on, Chrome already puts a
+      // getter-only document.modelContext on every page, so assigning the shim
+      // would throw. In that case the same tools go through the native
+      // registerTool instead.
+      //
       // The 4 sample tools' metadata lives in demo-tools.js, shared with
       // tools/demo-lint.js's headless run -- this script only adds the
       // handler functions and the browser-only `origin` field.
       // -----------------------------------------------------------------------
       import { demoTools } from './demo-tools.js';
 
-      (function () {
-        const registry = new Map(); // name -> { tool, handler }
-
-        function registerTool(tool, handler) {
-          registry.set(tool.name, { tool, handler });
-          modelContext.dispatchEvent(new Event('toolchange'));
-        }
-
-        function unregisterTool(name) {
-          registry.delete(name);
-          modelContext.dispatchEvent(new Event('toolchange'));
-        }
-
-        const modelContext = Object.assign(new EventTarget(), {
-          async getTools(_options) {
-            // Cross-origin discovery (fromOrigins) is out of scope for this
-            // single-origin demo shim.
-            const tools = [...registry.values()].map((entry) => entry.tool);
-            tools.sort((a, b) => a.name.localeCompare(b.name)); // spec: sorted by name
-            return tools;
-          },
-          async executeTool(tool, args) {
-            const entry = registry.get(tool && tool.name);
-            if (!entry) throw new Error(`Unknown tool: ${tool && tool.name}`);
-            // The explainer's handlers take a parsed object; older shims
-            // passed a JSON string. Accept both, like the extension does.
-            let parsed = args;
-            if (typeof args === 'string') {
-              try {
-                parsed = JSON.parse(args);
-              } catch (err) {
-                throw new Error(`Invalid arguments JSON: ${err.message}`);
-              }
-            }
-            return entry.handler(parsed);
-          },
-        });
-
-        // Plain assignment on the `document` instance. A JS expando like this
-        // is page-world only -- an isolated-world content script shares the
-        // DOM but not expandos, which is exactly why the extension reads
-        // modelContext from a MAIN-world script (page-bridge.js) and relays
-        // it out. This shim is visible to that bridge the same way a real
-        // polyfill would be.
-        document.modelContext = modelContext;
-
-        // ---- sample tools -----------------------------------------------------
-        // Metadata for these 4 comes from demo-tools.js; `origin` is added
-        // here since it's a browser-only field demo-tools.js can't fill in.
-
-        function demoTool(name) {
-          const meta = demoTools.find((t) => t.name === name);
-          return { ...meta, origin: location.origin };
-        }
-
-        registerTool(
-          demoTool('getWeather'),
-          (args) => ({
+      (async function () {
+        const handlers = {
+          getWeather: (args) => ({
             city: args && args.city ? String(args.city) : '(unknown)',
             tempF: 68,
             condition: 'Partly cloudy',
           }),
-        );
-
-        registerTool(
-          demoTool('addTodo'),
-          (args) => {
+          addTodo: (args) => {
             const text = args && typeof args.text === 'string' ? args.text : '';
             const li = document.createElement('li');
             li.textContent = text; // page-controlled todo text stays text, not markup, here too
             document.getElementById('todo-list').appendChild(li);
             return { added: text };
           },
-        );
+          // Deliberately suspicious: an innocuous-sounding tool whose DESCRIPTION
+          // carries a prompt-injection payload. This is exactly the shape
+          // lint.js's real implementation is meant to catch.
+          summarizePage: () => ({ summary: '(demo tool -- does not actually summarize or exfiltrate anything)' }),
+          // Deliberately over-broad: a single unconstrained free-text parameter
+          // backing something that sounds like it can run arbitrary commands.
+          runShellCommand: () => ({ output: '(demo tool -- does not actually run anything)' }),
+        };
 
-        // Deliberately suspicious: an innocuous-sounding tool whose DESCRIPTION
-        // carries a prompt-injection payload. This is exactly the shape
-        // lint.js's real implementation is meant to catch.
-        registerTool(
-          demoTool('summarizePage'),
-          (args) => ({ summary: '(demo tool -- does not actually summarize or exfiltrate anything)' }),
-        );
+        const pingServer = {
+          name: 'pingServer',
+          description: 'Registered live via the "Register a 5th tool" button, to demo toolchange.',
+          inputSchema: JSON.stringify({ type: 'object', properties: {} }),
+          annotations: { readOnlyHint: true, untrustedContentHint: false },
+        };
 
-        // Deliberately over-broad: a single unconstrained free-text parameter
-        // backing something that sounds like it can run arbitrary commands.
-        registerTool(
-          demoTool('runShellCommand'),
-          (args) => ({ output: '(demo tool -- does not actually run anything)' }),
-        );
+        const existing = document.modelContext;
+        const registry = existing && typeof existing.registerTool === 'function'
+          ? nativeRegistry(existing)
+          : shimRegistry();
 
-        document.getElementById('status').textContent = `document.modelContext ready with ${registry.size} tools.`;
+        let count = 0;
+        for (const meta of demoTools) {
+          if (await registry.register(meta, handlers[meta.name])) count += 1;
+        }
+        document.getElementById('status').textContent = `document.modelContext ready with ${count} tools.`;
 
         document.getElementById('add-fifth-tool-btn').addEventListener('click', () => {
           if (registry.has('pingServer')) return;
-          registerTool(
-            {
-              name: 'pingServer',
-              description: 'Registered live via the "Register a 5th tool" button, to demo toolchange.',
-              inputSchema: JSON.stringify({ type: 'object', properties: {} }),
-              annotations: { readOnlyHint: true, untrustedContentHint: false },
-              origin: location.origin,
-            },
-            () => ({ ok: true }),
-          );
+          void registry.register(pingServer, () => ({ ok: true }));
         });
 
         document.getElementById('remove-tool-btn').addEventListener('click', () => {
-          unregisterTool('getWeather');
+          registry.unregister('getWeather');
         });
+
+        // Native registerTool wants inputSchema as an object (a JSON string
+        // throws TypeError), and unregistering is done by aborting the signal
+        // the tool was registered with.
+        function nativeRegistry(mc) {
+          const controllers = new Map(); // name -> AbortController
+          return {
+            has: (name) => controllers.has(name),
+            async register(meta, handler) {
+              const controller = new AbortController();
+              const inputSchema = typeof meta.inputSchema === 'string' ? JSON.parse(meta.inputSchema) : meta.inputSchema;
+              try {
+                await mc.registerTool(
+                  { name: meta.name, description: meta.description, inputSchema, annotations: meta.annotations, execute: handler },
+                  { signal: controller.signal },
+                );
+              } catch (err) {
+                console.error(`registering ${meta.name} failed:`, err);
+                return false;
+              }
+              controllers.set(meta.name, controller);
+              return true;
+            },
+            unregister(name) {
+              const controller = controllers.get(name);
+              if (!controller) return;
+              controllers.delete(name);
+              controller.abort();
+            },
+          };
+        }
+
+        function shimRegistry() {
+          const tools = new Map(); // name -> { tool, handler }
+
+          const modelContext = Object.assign(new EventTarget(), {
+            async getTools(_options) {
+              // Cross-origin discovery (fromOrigins) is out of scope for this
+              // single-origin demo shim.
+              const list = [...tools.values()].map((entry) => entry.tool);
+              list.sort((a, b) => a.name.localeCompare(b.name)); // spec: sorted by name
+              return list;
+            },
+            async executeTool(tool, args) {
+              const entry = tools.get(tool && tool.name);
+              if (!entry) throw new Error(`Unknown tool: ${tool && tool.name}`);
+              // The explainer's handlers take a parsed object; older shims
+              // passed a JSON string. Accept both, like the extension does.
+              let parsed = args;
+              if (typeof args === 'string') {
+                try {
+                  parsed = JSON.parse(args);
+                } catch (err) {
+                  throw new Error(`Invalid arguments JSON: ${err.message}`);
+                }
+              }
+              return entry.handler(parsed);
+            },
+          });
+
+          // Plain assignment on the `document` instance. A JS expando like this
+          // is page-world only -- an isolated-world content script shares the
+          // DOM but not expandos, which is exactly why the extension reads
+          // modelContext from a MAIN-world script (page-bridge.js) and relays
+          // it out. This shim is visible to that bridge the same way a real
+          // polyfill would be.
+          document.modelContext = modelContext;
+
+          return {
+            has: (name) => tools.has(name),
+            async register(meta, handler) {
+              // `origin` is a browser-only field demo-tools.js can't fill in.
+              tools.set(meta.name, { tool: { ...meta, origin: location.origin }, handler });
+              modelContext.dispatchEvent(new Event('toolchange'));
+              return true;
+            },
+            unregister(name) {
+              tools.delete(name);
+              modelContext.dispatchEvent(new Event('toolchange'));
+            },
+          };
+        }
       })();
     </script>
   </body>

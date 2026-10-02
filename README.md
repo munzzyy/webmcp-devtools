@@ -45,7 +45,16 @@ Every string a page provides is treated as hostile. Findings render as text only
 3. **Load unpacked** and select this repo's root directory
 4. Open DevTools on any page and look for the **WebMCP** tab
 
-WebMCP itself needs Chrome 150+ with `chrome://flags/#enable-webmcp-testing` turned on (native tools additionally require the `tools` Permissions Policy on an origin-isolated document), or a page that installs a polyfill. Either way, open [`examples/demo.html`](examples/demo.html) in Chrome (no flag needed) to try the panel against a self-contained page. It defines `document.modelContext` with an inline shim and registers four sample tools: two benign (`getWeather`, `addTodo`), one with a prompt-injection description (`summarizePage`), and one that runs arbitrary shell commands (`runShellCommand`). Two buttons fire `toolchange` live so you can watch the timeline, the tool-set diff, and the diagnostics update.
+WebMCP itself needs Chrome 150+ with `chrome://flags/#enable-webmcp-testing` turned on (native tools additionally require the `tools` Permissions Policy on an origin-isolated document), or a page that installs a polyfill. To try the panel against a self-contained page, serve the demo and open the URL it prints:
+
+```
+$ node tools/serve-demo.js
+http://127.0.0.1:<port>/demo.html
+```
+
+Pass a port number to pick one. The server only listens on 127.0.0.1 and only serves `examples/`. Opening [`examples/demo.html`](examples/demo.html) straight from disk won't work, because Chrome blocks module imports on `file://` pages and the tools never register.
+
+The demo works with or without the flag. Without it, the page defines `document.modelContext` with an inline shim; with it, the page registers the same tools through Chrome's own `registerTool`. Either way it registers four sample tools: two benign (`getWeather`, `addTodo`), one with a prompt-injection description (`summarizePage`), and one that runs arbitrary shell commands (`runShellCommand`). Two buttons fire `toolchange` live so you can watch the timeline, the tool-set diff, and the diagnostics update.
 
 Want to see what the linter catches before installing anything? `lint.js` has no `chrome.*` dependency, so it runs in plain Node against those same four tools:
 
@@ -92,9 +101,10 @@ core/
   toolDiff.js         Pure: diff successive tool announcements (added/removed/mutated)
 tests/                node --test over core/, lint.js, manifest checks, plus fake-DOM
                       runs of the real panel.js, content.js, and page-bridge.js
-examples/demo.html     Self-contained demo page with an inline WebMCP shim + 4 sample tools
+examples/demo.html     Self-contained demo page: 4 sample tools, via an inline shim or native WebMCP
 examples/demo-tools.js Metadata for those 4 sample tools, shared with tools/demo-lint.js
 tools/demo-lint.js     Headless: lints the 4 sample tools with plain node, no Chrome needed
+tools/serve-demo.js    Serves examples/ on 127.0.0.1 so the demo page loads over http
 icons/                Extension + panel icons
 .github/workflows/ci.yml   node --test on Node 20 and 22
 ```
@@ -136,7 +146,7 @@ node --test
 
 Runs the pure `core/` unit tests, the `lint.js` security tests, and structural checks on `manifest.json`, and drives the real `panel.js`, `content.js`, and `page-bridge.js` against small fakes of exactly the DOM and `chrome.*` surface they touch (see `tests/panelHarness.js` and `tests/worldHarness.js`). Zero dependencies, Node's built-in runner only.
 
-What the fakes cannot prove is that a MAIN-world script really sees a page-installed `modelContext` across Chrome's world boundary. `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` covers that: it loads the real extension into headless Chromium against a fixture page that registers tools via `document.modelContext.registerTool` and asserts the whole relay end to end (it skips, loudly, when not opted in or when Chromium is missing). The background relay still needs a hand check: load the extension unpacked and open `examples/demo.html`.
+What the fakes cannot prove is that a MAIN-world script really sees a page-installed `modelContext` across Chrome's world boundary. `WEBMCP_E2E=1 node --test tests/bridge.e2e.test.js` covers that: it loads the real extension into headless Chromium against a fixture page that registers tools via `document.modelContext.registerTool` and asserts the whole relay end to end (it skips, loudly, when not opted in or when Chromium is missing). The background relay still needs a hand check: load the extension unpacked, run `node tools/serve-demo.js`, and open the demo page.
 
 ## License
 
