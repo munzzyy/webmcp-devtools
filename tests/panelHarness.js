@@ -7,7 +7,8 @@
 // real panel.js against a fake DOM tests that logic directly rather than a copy
 // of it. This is NOT a general DOM: it implements exactly what panel.js touches
 // (textContent, appendChild/removeChild/insertBefore/firstChild, addEventListener, class,
-// setAttribute, hidden, value, classList.add, createElement/createTextNode).
+// set/get/removeAttribute, hidden, value, classList.add, createElement/createTextNode,
+// focus and document.activeElement).
 
 const PANEL_IDS = [
   'app', 'status-bar', 'tools-section', 'tools-toolbar', 'refresh-btn', 'copy-findings-btn', 'tools-count',
@@ -30,6 +31,7 @@ class FakeNode {
   }
 
   set textContent(v) {
+    for (const child of this.children) blurIfInside(child);
     this._text = String(v);
     this.children = [];
   }
@@ -48,7 +50,19 @@ class FakeNode {
   removeChild(node) {
     this.children = this.children.filter((c) => c !== node);
     node.parent = null;
+    blurIfInside(node);
     return node;
+  }
+
+  contains(node) {
+    if (node === this) return true;
+    return this.children.some((c) => c instanceof FakeNode && c.contains(node));
+  }
+
+  // Like a real DOM: the focused element is whatever was focused last, and
+  // removing it (or anything around it) drops focus back to the body.
+  focus() {
+    if (FakeNode.document) FakeNode.document.activeElement = this;
   }
 
   insertBefore(node, ref) {
@@ -72,6 +86,14 @@ class FakeNode {
     this.attributes[key] = String(value);
   }
 
+  getAttribute(key) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, key) ? this.attributes[key] : null;
+  }
+
+  removeAttribute(key) {
+    delete this.attributes[key];
+  }
+
   dispatch(type, event = {}) {
     for (const fn of this.listeners[type] || []) fn({ preventDefault() {}, ...event });
   }
@@ -87,6 +109,11 @@ class FakeNode {
     }
     return out;
   }
+}
+
+function blurIfInside(node) {
+  const doc = FakeNode.document;
+  if (doc && node instanceof FakeNode && node.contains(doc.activeElement)) doc.activeElement = doc.body;
 }
 
 class FakeText {
@@ -119,6 +146,8 @@ export async function loadPanel() {
     },
     createTextNode: (text) => new FakeText(text),
   };
+  document.activeElement = document.body;
+  FakeNode.document = document;
 
   let messageHandler = null;
   const sent = [];
@@ -180,6 +209,7 @@ export async function loadPanel() {
     clipboardWrites,
     setClipboardFails: (fails) => { navigator._clipboardFails = fails; },
     createdElements: () => createdElements,
+    document,
   };
 }
 loadPanel.counter = 0;

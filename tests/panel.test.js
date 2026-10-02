@@ -415,3 +415,65 @@ test('a call flood adds one timeline entry per call instead of rebuilding the li
   p.emit(call(601));
   assert.deepEqual(p.el('timeline-list').children.map((li) => li.children[1].textContent), ['observed call: tool601']);
 });
+
+const threeTools = () => ({
+  type: 'tools', frameId: 0, origin: 'https://x', hasModelContext: true,
+  tools: [tool('t1', 'addTodo', 'Todos.'), tool('t2', 'getWeather', 'Weather.'), tool('t3', 'runShellCommand', 'Runs commands.')],
+});
+const nameOfRow = (row) => row.children[0].textContent;
+
+test('Enter on a tool row keeps keyboard focus on that row, and a re-announcement keeps it there', async () => {
+  const p = await loadPanel();
+  p.emit(threeTools());
+  const row = p.rows()[1];
+  assert.equal(nameOfRow(row), 'getWeather');
+  row.focus();
+  row.dispatch('keydown', { key: 'Enter' });
+  assert.equal(p.text('detail-name'), 'getWeather');
+  assert.equal(p.document.activeElement, row);
+  assert.ok(p.rows().includes(row));
+
+  p.emit(threeTools());
+  assert.equal(p.document.activeElement, row);
+  assert.ok(p.rows().includes(row));
+  assert.equal(nameOfRow(p.document.activeElement), 'getWeather');
+
+  // A new tool sorting ahead of it shifts the row down without dropping focus.
+  const more = threeTools();
+  more.tools.unshift(tool('t4', 'aaaFirst', 'First.'));
+  p.emit(more);
+  assert.equal(p.document.activeElement, row);
+  assert.equal(p.rows().indexOf(row), 2);
+});
+
+test('only the selected tool row carries aria-current', async () => {
+  const p = await loadPanel();
+  p.emit(threeTools());
+  p.rows()[2].dispatch('click');
+  const current = p.rows().filter((r) => r.getAttribute('aria-current') === 'true');
+  assert.equal(current.length, 1);
+  assert.equal(nameOfRow(current[0]), 'runShellCommand');
+  p.rows()[0].dispatch('click');
+  const after = p.rows().filter((r) => r.getAttribute('aria-current') !== null);
+  assert.deepEqual(after.map(nameOfRow), ['addTodo']);
+});
+
+test('the live status bar is left alone when its text has not changed', async () => {
+  const p = await loadPanel();
+  p.emit(threeTools());
+  const bar = p.el('status-bar');
+  const before = [...bar.children];
+  assert.ok(before.length > 0);
+  p.emit(threeTools());
+  p.emit({
+    type: 'status', frameId: 0, origin: 'https://x', bridge: true, hasModelContext: true,
+    surfaces: { document: true, navigator: false }, capabilities: { getTools: true, executeTool: true, registerTool: true },
+    observing: { executeTool: true, registerTool: true }, toolCount: 3,
+  });
+  assert.equal(bar.children.length, before.length);
+  assert.ok(bar.children.every((child, i) => child === before[i]), 'status bar nodes were rebuilt');
+
+  p.emit({ ...threeTools(), tools: [], error: 'getTools() rejected' });
+  assert.ok(p.text('status-bar').includes('Error reading tools'), p.text('status-bar'));
+  assert.notEqual(bar.children[0], before[0]);
+});

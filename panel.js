@@ -30,6 +30,10 @@ const toolsByFrame = new Map();
 const mutatedFields = new Map();
 let timelineState = createTimelineState();
 let renderedTimeline = []; // { entry, node } on screen, newest first
+let renderedRows = []; // tool table rows on screen, in order
+let rowsByKey = new Map(); // `${frameId}:${toolId}` -> its row, reused across renders
+const rowContent = new WeakMap(); // row -> signature of the cells it shows
+let statusSignature = null; // what the status bar shows right now
 let selectedToolKey = null; // { frameId, toolId, fingerprint } | null
 let lastDetailKey = null; // which selection the execute result panes belong to
 let callCounter = 0;
@@ -342,26 +346,34 @@ function clear(el) {
 // Rendering
 // ---------------------------------------------------------------------------
 
+// The status bar is an aria-live region, so rebuilding it on every message
+// made screen readers re-announce it constantly. Build the badges as plain
+// descriptions first and only touch the DOM when they actually changed.
 function renderStatusBar() {
+  const items = statusBarItems();
+  const signature = JSON.stringify(items);
+  if (signature === statusSignature) return;
+  statusSignature = signature;
   const statusEl = document.getElementById('status-bar');
   clear(statusEl);
+  for (const item of items) statusEl.appendChild(h(item.tag, { class: item.class, text: item.text }));
+}
+
+function statusBarItems() {
+  const items = [];
+  const badge = (cls, text) => items.push({ tag: 'span', class: `status-badge ${cls}`, text });
 
   // A dropped Port means everything below is unknown, not clean. Say so and
   // keep saying so until the reconnect lands and fresh state arrives.
   if (disconnected) {
-    statusEl.appendChild(
-      h('span', {
-        class: 'status-badge status-error',
-        text: 'Disconnected from the extension (service worker restarted?). Reconnecting; tool state is unknown until then.',
-      }),
-    );
-    return;
+    badge('status-error', 'Disconnected from the extension (service worker restarted?). Reconnecting; tool state is unknown until then.');
+    return items;
   }
 
   const frames = [...toolsByFrame.values()];
   if (frames.length === 0) {
-    statusEl.appendChild(h('span', { class: 'status-badge status-pending', text: 'Waiting for page…' }));
-    return;
+    badge('status-pending', 'Waiting for page…');
+    return items;
   }
 
   // A frame whose MAIN-world bridge never checked in cannot be inspected at
@@ -369,12 +381,7 @@ function renderStatusBar() {
   // render it as an error, and never let it fall through to "not found".
   const deadBridges = frames.filter((f) => f.bridge === false);
   for (const f of deadBridges) {
-    statusEl.appendChild(
-      h('span', {
-        class: 'status-badge status-error',
-        text: `Bridge did not run${f.origin ? ` in ${f.origin}` : ''}: this frame cannot be inspected. Do not read it as having no tools.`,
-      }),
-    );
+    badge('status-error', `Bridge did not run${f.origin ? ` in ${f.origin}` : ''}: this frame cannot be inspected. Do not read it as having no tools.`);
   }
 
   const liveFrames = frames.filter((f) => f.bridge !== false);
@@ -388,39 +395,26 @@ function renderStatusBar() {
   // origin trial ends -- both worth telling the user about explicitly.
   const navOnly = liveFrames.filter((f) => f.surfaces && f.surfaces.navigator && !f.surfaces.document);
   for (const f of navOnly) {
-    statusEl.appendChild(
-      h('span', {
-        class: 'status-badge status-warn',
-        text: `navigator.modelContext only${f.origin ? ` in ${f.origin}` : ''}: deprecated surface, not readable here, and it stops working when the origin trial ends.`,
-      }),
-    );
+    badge('status-warn', `navigator.modelContext only${f.origin ? ` in ${f.origin}` : ''}: deprecated surface, not readable here, and it stops working when the origin trial ends.`);
   }
 
   if (!anyModelContext) {
     if (liveFrames.length > 0) {
-      statusEl.appendChild(
-        h('span', { class: 'status-badge status-absent', text: 'document.modelContext: not found' }),
-      );
-      statusEl.appendChild(
-        h('p', {
-          class: 'empty-state',
-          text:
-            'No WebMCP tools found on this page. Enable chrome://flags/#enable-webmcp-testing, ' +
-            'or the page must register tools / load the polyfill (@mcp-b/webmcp-polyfill).',
-        }),
-      );
+      badge('status-absent', 'document.modelContext: not found');
+      items.push({
+        tag: 'p',
+        class: 'empty-state',
+        text:
+          'No WebMCP tools found on this page. Enable chrome://flags/#enable-webmcp-testing, ' +
+          'or the page must register tools / load the polyfill (@mcp-b/webmcp-polyfill).',
+      });
     }
-    return;
+    return items;
   }
 
   const frameWord = frames.length === 1 ? 'frame' : 'frames';
   const toolWord = totalTools === 1 ? 'tool' : 'tools';
-  statusEl.appendChild(
-    h('span', {
-      class: 'status-badge status-present',
-      text: `document.modelContext: present (${totalTools} ${toolWord} across ${frames.length} ${frameWord})`,
-    }),
-  );
+  badge('status-present', `document.modelContext: present (${totalTools} ${toolWord} across ${frames.length} ${frameWord})`);
 
   // "Present" with no getTools() is a real state (the explainer specifies
   // registerTool first and leaves discovery as a TODO): the list below is
@@ -429,12 +423,7 @@ function renderStatusBar() {
     (f) => f.hasModelContext && f.capabilities && f.capabilities.getTools === false,
   );
   for (const f of noGetTools) {
-    statusEl.appendChild(
-      h('span', {
-        class: 'status-badge status-warn',
-        text: `getTools() unavailable${f.origin ? ` in ${f.origin}` : ''}: showing only registrations observed since the bridge loaded, not a full listing.`,
-      }),
-    );
+    badge('status-warn', `getTools() unavailable${f.origin ? ` in ${f.origin}` : ''}: showing only registrations observed since the bridge loaded, not a full listing.`);
   }
 
   // A frame that reported an error reading its tools would otherwise be
@@ -442,10 +431,9 @@ function renderStatusBar() {
   // "present (0 tools)" is never mistaken for "tools read successfully".
   const errored = frames.filter((f) => typeof f.error === 'string' && f.error);
   for (const f of errored) {
-    statusEl.appendChild(
-      h('span', { class: 'status-badge status-error', text: `Error reading tools: ${f.error}` }),
-    );
+    badge('status-error', `Error reading tools: ${f.error}`);
   }
+  return items;
 }
 
 function flattenTools() {
@@ -558,38 +546,68 @@ function copyFindingsToClipboard() {
   navigator.clipboard.writeText(json).then(() => flash('Copied!'), () => flash('Copy failed'));
 }
 
+// Rows are keyed by frame and toolId and reused across renders. Rebuilding
+// the table removed the focused row, so pressing Enter on a row (which
+// re-renders to show the selection) or any re-announcement from the page
+// dropped keyboard focus to the page body. A row only moves when the sort
+// order actually changed, and its cells are only rebuilt when they differ.
 function renderToolsTable() {
   const tbody = document.getElementById('tools-tbody');
-  clear(tbody);
-
   const rows = flattenTools();
   document.getElementById('tools-count').textContent = `${rows.length} tool${rows.length === 1 ? '' : 's'}`;
 
+  const nextByKey = new Map();
+  const wanted = [];
   for (const { frameId, tool } of rows) {
-    const findings = findingsFor(frameId, tool);
-    const worst = worstSeverity(findings);
-    const isSelected = !!selectedToolKey && selectedToolKey.frameId === frameId && selectedToolKey.toolId === tool.toolId;
-
-    const tr = h(
-      'tr',
-      { class: `tool-row${isSelected ? ' tool-row-selected' : ''}`, tabindex: '0' },
-      [
-        h('td', { text: tool.name }),
-        h('td', { text: tool.origin || '' }),
-        h('td', { text: tool.annotations.readOnlyHint ? 'yes' : 'no' }),
-        h('td', { text: tool.annotations.untrustedContentHint ? 'yes' : 'no' }),
-        h('td', {}, [severityBadge(worst)]),
-      ],
-    );
-    tr.addEventListener('click', () => selectTool(frameId, tool.toolId));
-    tr.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        selectTool(frameId, tool.toolId);
-      }
-    });
-    tbody.appendChild(tr);
+    const key = `${frameId}:${tool.toolId}`;
+    let tr = nextByKey.has(key) ? null : rowsByKey.get(key);
+    if (!tr) tr = createToolRow(frameId, tool.toolId);
+    if (!nextByKey.has(key)) nextByKey.set(key, tr);
+    fillToolRow(tr, frameId, tool);
+    wanted.push(tr);
   }
+
+  const keep = new Set(wanted);
+  for (const tr of renderedRows) {
+    if (!keep.has(tr)) tbody.removeChild(tr);
+  }
+  for (let i = 0; i < wanted.length; i += 1) {
+    if (tbody.children[i] !== wanted[i]) tbody.insertBefore(wanted[i], tbody.children[i] || null);
+  }
+  renderedRows = wanted;
+  rowsByKey = nextByKey;
+}
+
+function createToolRow(frameId, toolId) {
+  const tr = h('tr', { tabindex: '0' });
+  tr.addEventListener('click', () => selectTool(frameId, toolId));
+  tr.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      selectTool(frameId, toolId);
+    }
+  });
+  return tr;
+}
+
+function fillToolRow(tr, frameId, tool) {
+  const worst = worstSeverity(findingsFor(frameId, tool));
+  const isSelected = !!selectedToolKey && selectedToolKey.frameId === frameId && selectedToolKey.toolId === tool.toolId;
+  tr.className = `tool-row${isSelected ? ' tool-row-selected' : ''}`;
+  if (isSelected) tr.setAttribute('aria-current', 'true');
+  else tr.removeAttribute('aria-current');
+
+  const ro = tool.annotations.readOnlyHint ? 'yes' : 'no';
+  const uc = tool.annotations.untrustedContentHint ? 'yes' : 'no';
+  const signature = JSON.stringify([tool.name, tool.origin || '', ro, uc, worst || '']);
+  if (rowContent.get(tr) === signature) return;
+  rowContent.set(tr, signature);
+  clear(tr);
+  tr.appendChild(h('td', { text: tool.name }));
+  tr.appendChild(h('td', { text: tool.origin || '' }));
+  tr.appendChild(h('td', { text: ro }));
+  tr.appendChild(h('td', { text: uc }));
+  tr.appendChild(h('td', {}, [severityBadge(worst)]));
 }
 
 function severityBadge(severity) {
