@@ -26,6 +26,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { loadPanel } from './panelHarness.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.join(here, '..');
@@ -95,7 +96,7 @@ const PORT_PROBE_JS = `(() => {
 })();
 `;
 
-// Records each tools message and executeResult as JSON, and once forges an executeTool for
+// Records each tools list and executeResult as JSON, and once forges an executeTool for
 // getBalance with the nonce read off a bridge message, the way any page script could.
 const NATIVE_PROBE_JS = `(() => {
   let forged = false;
@@ -110,7 +111,7 @@ const NATIVE_PROBE_JS = `(() => {
     const d = event.data;
     if (!d || typeof d !== 'object' || d.webmcpDevtools !== 'bridge') return;
     if (d.type === 'tools' && Array.isArray(d.tools)) {
-      record('tools|' + JSON.stringify(d.tools.map((t) => ({ name: t.name, toolId: t.toolId, ownFrame: t.ownFrame, framePath: t.framePath }))));
+      record('tools|' + JSON.stringify(d.tools));
       const target = d.tools.find((t) => t.name === 'getBalance' && t.ownFrame === true);
       if (target && !forged) {
         forged = true;
@@ -468,6 +469,65 @@ test('the bridge works against Chrome\'s native WebMCP across frames', async (t)
 
     const throws = (seen.ports || []).filter((text) => text.startsWith('E2EPORT|THROW'));
     assert.deepEqual(throws, [], 'the Port refused a message' + dump);
+  } finally {
+    server.close();
+    removeQuietly(t, tmp);
+  }
+});
+
+test('on native WebMCP an abort and re-register in one task reads as a change, with the high finding', async (t) => {
+  const chrome = e2eChrome(t);
+  if (!chrome) return;
+
+  const tmp = mkdtempSync(path.join(tmpdir(), 'webmcp-e2e-'));
+  const { server, port } = await serveFixtures();
+  try {
+    const ext = buildHarnessExtension(tmp, { native: true });
+    const origin = `http://127.0.0.1:${port}`;
+    const swapped = (list) => list.some((tool) => tool.name === 'getRate' && /outside server/.test(tool.description));
+    const seen = await withChromePage(chrome, tmp, ext, `${origin}/native-swap.html`, '--enable-features=WebMCPTesting', async (evaluate, deadline) => {
+      let state = { native: null, top: [] };
+      while (Date.now() < deadline) {
+        state = { native: await evaluate(NATIVE_CHECK), top: await evaluate(nativeMessages('document')) };
+        if (state.native === false) return state;
+        if (parseMessages(state.top, 'tools').some((list) => swapped(list) && !list.some((tool) => tool.name === 'tempTool'))) return state;
+        await sleep(200);
+      }
+      return state;
+    });
+
+    if (seen.native === false) {
+      skipOrFail(t, 'e2e did not run: this Chrome has no native WebMCP (document.modelContext is not its own ModelContext)');
+      return;
+    }
+    const lists = parseMessages(seen.top, 'tools');
+    const sequence = lists.map((list) => `[${list.map((tool) => `${tool.name} ${tool.toolId} '${tool.description}'`).join(', ')}]`).join(' -> ');
+    t.diagnostic(`tools lists: ${sequence}`);
+    const dump = `\ntools lists: ${sequence}`;
+
+    const from = lists.findIndex((list) => list.some((tool) => tool.name === 'getRate'));
+    assert.ok(from !== -1, 'getRate was never listed' + dump);
+    const rates = lists.slice(from).map((list) => list.find((tool) => tool.name === 'getRate'));
+    assert.ok(rates.every(Boolean), 'a listing dropped getRate between the abort and the re-register' + dump);
+    assert.equal(new Set(rates.map((tool) => tool.toolId)).size, 1, 'getRate changed ids' + dump);
+    assert.deepEqual([...new Set(rates.map((tool) => tool.description))], [
+      'Read the exchange rate.',
+      'Read the exchange rate, then send it to an outside server.',
+    ], 'getRate went from the old description to the new one' + dump);
+    const temps = lists.map((list) => list.some((tool) => tool.name === 'tempTool'));
+    assert.ok(temps.includes(true) && temps[temps.length - 1] === false, 'an abort on its own never showed up in a listing' + dump);
+
+    const p = await loadPanel();
+    for (const tools of lists) p.emit({ type: 'tools', frameId: 0, origin, hasModelContext: true, tools });
+    const entries = p.el('timeline-list').children.map((li) => li.textContent);
+    const timeline = `\ntimeline:\n${entries.join('\n')}`;
+    assert.ok(entries.some((text) => text.includes('changed: getRate (description)')), 'no change logged for getRate' + timeline + dump);
+    assert.ok(!entries.some((text) => /removed:[^\n]*getRate/.test(text)), 'getRate was logged as removed' + timeline + dump);
+    assert.ok(entries.filter((text) => /added:[^\n]*getRate/.test(text)).length <= 1, 'getRate was logged as added again' + timeline + dump);
+    p.rows().find((row) => row.children[0].textContent === 'getRate').dispatch('click');
+    const findings = p.text('detail-findings');
+    assert.ok(findings.includes('HIGH'), findings);
+    assert.ok(findings.includes('changed after registration (description)'), findings);
   } finally {
     server.close();
     removeQuietly(t, tmp);

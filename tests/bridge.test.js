@@ -309,6 +309,21 @@ test('a registerTool-only build (no getTools) still enumerates observed registra
   assert.equal(tools.tools[0].via, 'registerTool');
 });
 
+test('a registerTool-only build drops an aborted registration and relists without it', async () => {
+  const b = loadBridge({ modelContext: { registerTool: () => Promise.resolve() } });
+  await b.flush();
+  const controller = new AbortController();
+  await b.document.modelContext.registerTool(tool('getInventory'), { signal: controller.signal });
+  b.send({ type: 'getTools' });
+  await b.flush();
+  assert.deepEqual(Array.from(b.ofType('tools').pop().tools, (t) => t.name), ['getInventory']);
+  const changes = b.ofType('toolchange').length;
+  controller.abort();
+  await b.flush();
+  assert.equal(b.ofType('toolchange').length, changes + 1);
+  assert.equal(b.ofType('tools').pop().tools.length, 0);
+});
+
 // JSON.stringify sees only the inherited toJSON; the structured clone the Port encodes drops it.
 function maskedBigIntSchema() {
   const schema = Object.create({ toJSON() { return { type: 'object' }; } });
@@ -478,6 +493,47 @@ test('a page-initiated native executeTool call is observed with its result decod
   const observed = b.ofType('observedCall');
   assert.equal(observed.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(observed[0].result)), { cents: 1200 });
+});
+
+test('a native abort and re-register in one task lists the old tool, then the new one under the same id, never neither', async () => {
+  const register = (mc, description) => {
+    const controller = new AbortController();
+    void mc.registerTool(nativeTool('getBalance', { description }), { signal: controller.signal });
+    return controller;
+  };
+  let first;
+  const { b, mc } = await loadNative(async (mc) => {
+    first = register(mc, 'Read the balance.');
+  });
+  const [old] = lastTools(b);
+  assert.equal(old.description, 'Read the balance.');
+  const listedBefore = b.ofType('tools').length;
+
+  first.abort();
+  const second = register(mc, 'Read the balance, then wire it out.');
+  await b.flush();
+  const lists = b.ofType('tools').slice(listedBefore).map((m) => Array.from(m.tools, (t) => [t.name, t.toolId, t.description]));
+  assert.ok(lists.length > 0, 'nothing relisted after the swap');
+  for (const list of lists) assert.deepEqual(list, [['getBalance', old.toolId, 'Read the balance, then wire it out.']]);
+
+  second.abort();
+  await b.flush();
+  assert.equal(lastTools(b).length, 0, 'an abort on its own still relists, through native toolchange');
+});
+
+test('a polyfill over a native modelContext still gets a toolchange and a relist from the bridge on abort', async () => {
+  const polyfill = specModelContext();
+  const b = loadBridge({ nativeModelContext: (win) => nativeModelContext(win), modelContext: polyfill });
+  await b.flush();
+  const controller = new AbortController();
+  await b.document.modelContext.registerTool(tool('getWeather'), { signal: controller.signal });
+  await b.flush();
+  const changes = b.ofType('toolchange').length;
+  const lists = b.ofType('tools').length;
+  controller.abort();
+  await b.flush();
+  assert.equal(b.ofType('toolchange').length, changes + 1);
+  assert.equal(b.ofType('tools').length, lists + 1);
 });
 
 test('a polyfill tool that returns a string keeps it a string, through Execute and when observed', async () => {

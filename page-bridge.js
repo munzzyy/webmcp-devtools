@@ -387,7 +387,7 @@
       if (typeof originalRegister === 'function') {
         const wrapped = function registerTool(descriptor, options) {
           const registered = instrumentDescriptor(descriptor);
-          trackRegistration(registered, options);
+          trackRegistration(mc, registered, options);
           return originalRegister.call(mc, registered, options);
         };
         mc.registerTool = wrapped;
@@ -447,7 +447,7 @@
     return copy;
   }
 
-  function trackRegistration(descriptor, options) {
+  function trackRegistration(mc, descriptor, options) {
     if (!descriptor || typeof descriptor !== 'object') return;
     trackedRegistrations.push(descriptor);
     const signal = options && options.signal;
@@ -456,6 +456,8 @@
         signal.addEventListener('abort', () => {
           const i = trackedRegistrations.indexOf(descriptor);
           if (i !== -1) trackedRegistrations.splice(i, 1);
+          // Native has already dropped the tool and fires its own toolchange later, so relisting now would show a same-task re-register as a removal.
+          if (isNativeModelContext(mc) && capabilitiesOf(mc).getTools) return;
           post({ type: 'toolchange', origin: safeOrigin(), timestamp: Date.now() });
           void announceTools();
         }, { once: true });

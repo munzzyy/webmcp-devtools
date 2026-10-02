@@ -611,7 +611,7 @@ function relayInto(p, b) {
   };
 }
 
-test('native re-registration of a tool reads as a change to that tool, not a new one', async () => {
+test('a native abort and re-register in one task reads as a change, not a removal and an addition, and Execute waits for a re-select', async () => {
   const p = await loadPanel();
   let mc;
   const b = loadBridge({ nativeModelContext: (win) => { mc = nativeModelContext(win); return mc; } });
@@ -639,6 +639,13 @@ test('native re-registration of a tool reads as a change to that tool, not a new
   const findings = p.text('detail-findings');
   assert.ok(findings.includes('HIGH'), findings);
   assert.ok(findings.includes('changed after registration (description)'), findings);
+
+  p.el('execute-form').dispatch('submit');
+  assert.equal(p.sent.filter((m) => m.type === 'executeTool').length, 0);
+  assert.ok(p.text('execute-error').includes('changed since you selected it'), p.text('execute-error'));
+  p.rows()[0].dispatch('click');
+  p.el('execute-form').dispatch('submit');
+  assert.equal(p.sent.filter((m) => m.type === 'executeTool').length, 1);
 });
 
 test('a polyfill re-registration under a known name also reads as a change, and Execute waits for a re-select', async () => {
