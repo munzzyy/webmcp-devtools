@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-Changes on main since [v0.2.0](https://github.com/munzzyy/webmcp-devtools/compare/v0.2.0...main).
+## v0.3.0 (2026-10-02)
 
 - The license is now GPL-3.0-or-later. Releases up to v0.2.0 stay under MIT.
 - A "Copy findings as JSON" button copies the whole audit to the clipboard. It lists every frame with its bridge health and read errors, and every tool with its full definition and findings. A frame the panel could not inspect never reads as clean.

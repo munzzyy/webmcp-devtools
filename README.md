@@ -154,7 +154,6 @@ What the fakes cannot prove is that a MAIN-world script really sees a page-insta
 
 What is left needs someone other than this repo's code: a release, a store account, or a person in front of a real DevTools window.
 
-- A release. Everything under Unreleased in [CHANGELOG.md](CHANGELOG.md) is on main only, including the move to GPL-3.0-or-later and the lint fixes. The newest tag is still v0.2.0, and that is the version [SECURITY.md](SECURITY.md) supports. Until a new tag is cut, load main unpacked to get them.
 - The Chrome Web Store. Install is load-unpacked only for now. A listing needs a developer account and a privacy disclosure for a content script that runs on every site, and whether to list it at all is still an open decision.
 - A hand check of Copy findings as JSON in real DevTools. The tests fake the clipboard, and nobody has confirmed yet that Chrome lets an extension's DevTools panel write to it.
 

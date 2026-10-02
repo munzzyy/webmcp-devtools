@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WebMCP DevTools",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Inspects the WebMCP tools (document.modelContext) a page exposes: live tool table, call-history timeline, and per-tool security diagnostics, in a real DevTools panel.",
   "minimum_chrome_version": "150",
   "icons": {
