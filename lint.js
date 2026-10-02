@@ -54,7 +54,9 @@ const INJECTION_PATTERNS = [
 const SINK = /(?:webhook\.site|requestbin\.\w+|pipedream\.net|hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|(?<![0-9a-z-])[0-9a-z-]{1,63}\.ngrok(?:-free)?\.(?:io|app|dev)|pastebin\.com|transfer\.sh|0x0\.st|\.oast\.(?:fun|live|pro|online|site)|burpcollaborator\.net|interact\.sh|dnslog\.cn)/i;
 
 // Credential formats that should never appear in a tool description or schema.
-const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/;
+// OpenAI project and service-account keys and GitHub fine-grained tokens
+// carry '-' and '_' that the older sk-/gh*_ shapes do not allow.
+const SECRET = /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|sk-ant-[A-Za-z0-9_-]{20,}|sk-(?:proj|svcacct)-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/;
 
 // Parameter names that are dangerous when free-form (arbitrary payload passthrough).
 const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|filepath|file|url|uri|endpoint|host|redirect|callback|prompt|template|html|payload)$/i;
@@ -443,12 +445,24 @@ export function lintTool(tool) {
 
   // Params only get flagged when a risky NAME meets a free-form spec - "url" as an
   // enum of three values is fine, "url" as an unbounded string is a payload channel.
-  for (const [propName, spec] of Object.entries(schemaProperties(schema))) {
-    if (!RISKY_PARAM.test(propName)) continue;
-    if (isFreeformString(spec)) {
-      findings.push(finding('overparam', 'medium', `Unconstrained "${propName}" parameter`,
-        `The "${propName}" parameter is a free-form string with no enum, format, or length limit. Names like this often carry executable or path-like payloads, so the agent can be steered into passing something dangerous.`));
+  // Nested params count too: a "command" inside an options object or a batch
+  // array item is reachable exactly like a top-level one.
+  let overparams = 0;
+  let overparamsSkipped = 0;
+  for (const { pointer, name: propName, spec } of schemaParameters(schema)) {
+    if (!RISKY_PARAM.test(propName) || !isFreeformString(spec, schema, 0)) continue;
+    if (overparams >= MAX_OVERPARAM_FINDINGS) {
+      overparamsSkipped += 1;
+      continue;
     }
+    overparams += 1;
+    const where = pointer === `inputSchema.properties.${propName}` ? '' : ` at ${pointer}`;
+    findings.push(finding('overparam', 'medium', `Unconstrained "${propName}" parameter`,
+      `The "${propName}" parameter${where} is a free-form string with no enum, format, or length limit. Names like this often carry executable or path-like payloads, so the agent can be steered into passing something dangerous.`));
+  }
+  if (overparamsSkipped > 0) {
+    findings.push(finding('overparam', 'medium', 'More unconstrained risky parameters than shown',
+      `${overparamsSkipped} more unconstrained risky parameter(s) beyond the first ${MAX_OVERPARAM_FINDINGS} reported.`));
   }
 
   const dangerText = /\b(?:arbitrary|any)\s+(?:shell\s+|system\s+)?(?:command|commands|code|script|scripts|sql|query|queries)\b/i;
@@ -562,13 +576,91 @@ function isReadShaped(name) {
   return false;
 }
 
-function schemaProperties(schema) {
-  const props = schema && schema.properties;
-  return props && typeof props === 'object' ? props : {};
+// The same traversal as webmcp-lint's _schema_walk.py, so both linters see
+// the same parameters: map keys hold name -> subschema, sub keys hold a
+// subschema or a list of them, and only `properties` names are real
+// parameter names. Depth-capped, and each object is visited once, so a
+// self-referencing schema terminates.
+const SCHEMA_MAP_KEYS = ['properties', 'patternProperties', 'definitions', '$defs'];
+const SCHEMA_SUB_KEYS = ['items', 'additionalItems', 'additionalProperties', 'contains', 'propertyNames',
+  'not', 'if', 'then', 'else', 'allOf', 'anyOf', 'oneOf'];
+const MAX_OVERPARAM_FINDINGS = 20;
+const MAX_REF_HOPS = 8;
+
+function schemaParameters(schema) {
+  const out = [];
+  const seen = new Set();
+  const read = (node, key) => {
+    try {
+      return node[key];
+    } catch (err) {
+      return undefined;
+    }
+  };
+  const visit = (node, pointer, name, depth) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node) || depth > MAX_SCHEMA_DEPTH || seen.has(node)) return;
+    seen.add(node);
+    if (name) out.push({ pointer, name, spec: node });
+    for (const key of SCHEMA_MAP_KEYS) {
+      const mapping = read(node, key);
+      if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) continue;
+      let entries;
+      try {
+        entries = Object.entries(mapping);
+      } catch (err) {
+        continue;
+      }
+      for (const [childName, child] of entries) {
+        visit(child, `${pointer}.${key}.${childName}`, key === 'properties' ? childName : '', depth + 1);
+      }
+    }
+    for (const key of SCHEMA_SUB_KEYS) {
+      const child = read(node, key);
+      if (Array.isArray(child)) {
+        for (let i = 0; i < child.length; i += 1) visit(child[i], `${pointer}.${key}[${i}]`, '', depth + 1);
+      } else {
+        visit(child, `${pointer}.${key}`, '', depth + 1);
+      }
+    }
+  };
+  visit(schema, 'inputSchema', '', 0);
+  return out;
 }
 
-function isFreeformString(spec) {
+// Follows a local "#/..." JSON pointer inside the input schema. Anything else
+// (another document, an anchor, a path that is not there) resolves to
+// undefined: its shape is unknown, so it is not called free-form.
+function resolveLocalRef(root, ref) {
+  if (ref === '#') return root;
+  if (!ref.startsWith('#/')) return undefined;
+  let node = root;
+  for (const raw of ref.slice(2).split('/')) {
+    let token;
+    try {
+      token = decodeURIComponent(raw).replace(/~1/g, '/').replace(/~0/g, '~');
+    } catch (err) {
+      return undefined;
+    }
+    if (!node || typeof node !== 'object' || !Object.prototype.hasOwnProperty.call(node, token)) return undefined;
+    node = node[token];
+  }
+  return node && typeof node === 'object' ? node : undefined;
+}
+
+function isFreeformString(spec, root, hops) {
   if (!spec || typeof spec !== 'object') return false;
+  const constrained = spec.enum || spec.const || spec.format || spec.pattern ||
+    typeof spec.maxLength === 'number' || Array.isArray(spec.allOf) ||
+    Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
+  // A $ref-only spec has no type of its own; its shape is whatever it points
+  // at, so judge the target instead of calling it untyped.
+  if (typeof spec.$ref === 'string') {
+    const ownType = spec.type;
+    const allowsString = ownType === undefined || ownType === 'string' || (Array.isArray(ownType) && ownType.includes('string'));
+    if (constrained || !allowsString || hops >= MAX_REF_HOPS) return false;
+    const target = resolveLocalRef(root, spec.$ref);
+    return target === undefined ? false : isFreeformString(target, root, hops + 1);
+  }
   // A schema with no `type` accepts any JSON value, strings included, so an
   // untyped risky param is just as free-form as an explicit string one. Only
   // bail when a composite (allOf/anyOf/oneOf) is carrying the real shape.
@@ -576,8 +668,5 @@ function isFreeformString(spec) {
   const isString = spec.type === 'string' ||
     (Array.isArray(spec.type) && spec.type.includes('string')) || untyped;
   if (!isString) return false;
-  const constrained = spec.enum || spec.const || spec.format || spec.pattern ||
-    typeof spec.maxLength === 'number' || Array.isArray(spec.allOf) ||
-    Array.isArray(spec.anyOf) || Array.isArray(spec.oneOf);
   return !constrained;
 }

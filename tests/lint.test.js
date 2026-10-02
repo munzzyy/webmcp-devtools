@@ -714,3 +714,74 @@ test('emoji, Cyrillic, CJK variation sequences, keycaps and RTL text stay clean'
     assert.equal(f.filter((x) => x.id.startsWith('uni-') || x.id === 'inject').length, 0, `${JSON.stringify(text)}: ${JSON.stringify(f)}`);
   }
 });
+
+// --- Current key formats, built in the test so no real-looking key sits in
+// the source. ---
+const tokenOf = (prefix, alphabet, length) => prefix + Array.from({ length }, (_, i) => alphabet[i % alphabet.length]).join('');
+
+test('OpenAI project and service-account keys and GitHub fine-grained tokens are flagged', () => {
+  for (const token of [
+    tokenOf('sk-proj-', 'Ab3_-x9Q', 48),
+    tokenOf('sk-svcacct-', 'Zz8-_k2M', 48),
+    `${tokenOf('github_pat_', 'A1b2C3', 22)}_${tokenOf('', 'd4E5f6', 59)}`,
+  ]) {
+    const f = lintTool(normalizeTool({ name: 'auth', description: `Uses ${token} to sign in.`, inputSchema: '{}', annotations: { readOnlyHint: true } }));
+    assert.ok(f.some((x) => x.id === 'secret' && x.severity === 'high'), `${token.slice(0, 14)}: ${JSON.stringify(f)}`);
+  }
+});
+
+test('the older key formats are still flagged and a bare prefix is not', () => {
+  for (const token of [
+    tokenOf('ghp_', 'q7W8e9', 36),
+    tokenOf('xoxb-', '12ab-', 24),
+    tokenOf('AIza', 'Xy_-9z', 35),
+    tokenOf('sk-ant-', 'Rt5_-u', 40),
+    tokenOf('sk-', 'Mn3Op4', 40),
+  ]) {
+    const f = lintTool(normalizeTool({ name: 'auth', description: `Uses ${token} to sign in.`, inputSchema: '{}', annotations: { readOnlyHint: true } }));
+    assert.ok(f.some((x) => x.id === 'secret'), `${token.slice(0, 8)}: ${JSON.stringify(f)}`);
+  }
+  const bare = lintTool(normalizeTool({ name: 'auth', description: 'Keys look like sk-proj- or github_pat_ followed by random text.', inputSchema: '{}', annotations: { readOnlyHint: true } }));
+  assert.equal(bare.filter((x) => x.id === 'secret').length, 0, JSON.stringify(bare));
+});
+
+// --- Risky params nested in objects and arrays are reachable like
+// top-level ones; a $ref is judged by what it points at. ---
+const overparams = (inputSchema) => lintTool(normalizeTool({
+  name: 'doThing',
+  description: 'Does the thing.',
+  inputSchema,
+  annotations: { readOnlyHint: false },
+})).filter((x) => x.id === 'overparam');
+
+test('a risky param nested in an object or an array item is flagged with its path', () => {
+  const nestedUrl = overparams({ type: 'object', properties: { opts: { type: 'object', properties: { url: { type: 'string' } } } } });
+  assert.equal(nestedUrl.length, 1, JSON.stringify(nestedUrl));
+  assert.equal(nestedUrl[0].severity, 'medium');
+  assert.ok(nestedUrl[0].detail.includes('inputSchema.properties.opts.properties.url'), nestedUrl[0].detail);
+
+  const batch = overparams({ type: 'object', properties: { batch: { type: 'array', items: { type: 'object', properties: { command: { type: 'string' } } } } } });
+  assert.equal(batch.length, 1, JSON.stringify(batch));
+  assert.ok(batch[0].detail.includes('inputSchema.properties.batch.items.properties.command'), batch[0].detail);
+
+  const viaDefs = overparams({ type: 'object', properties: { o: { $ref: '#/$defs/Opts' } }, $defs: { Opts: { type: 'object', properties: { path: { type: 'string' } } } } });
+  assert.ok(viaDefs.some((x) => x.detail.includes('inputSchema.$defs.Opts.properties.path')), JSON.stringify(viaDefs));
+});
+
+test('a $ref param is judged by its target, and an unknown target is not called free-form', () => {
+  const schema = (target, ref = '#/$defs/c') => ({ type: 'object', properties: { cmd: { $ref: ref } }, $defs: { c: target } });
+  assert.equal(overparams(schema({ type: 'string', enum: ['start', 'stop'] })).length, 0);
+  assert.equal(overparams(schema({ type: 'string' })).length, 1);
+  assert.equal(overparams(schema({ type: 'string' }, '#/$defs/missing')).length, 0);
+  assert.equal(overparams(schema({ type: 'string' }, 'https://example.com/schemas/cmd.json')).length, 0);
+  const loop = { type: 'object', properties: { cmd: { $ref: '#/$defs/a' } }, $defs: { a: { $ref: '#/$defs/b' }, b: { $ref: '#/$defs/a' } } };
+  assert.equal(overparams(loop).length, 0);
+});
+
+test('a schema full of risky params reports a capped number of findings', () => {
+  const properties = {};
+  for (let i = 0; i < 40; i += 1) properties[`o${i}`] = { type: 'object', properties: { url: { type: 'string' } } };
+  const f = overparams({ type: 'object', properties });
+  assert.equal(f.length, 21, JSON.stringify(f.map((x) => x.title)));
+  assert.ok(f[20].detail.startsWith('20 more'), f[20].detail);
+});
