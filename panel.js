@@ -513,7 +513,9 @@ function copyFindingsToClipboard() {
       bridge: typeof frame.bridge === 'boolean' ? frame.bridge : null,
       hasModelContext: !!frame.hasModelContext,
       error: typeof frame.error === 'string' && frame.error ? frame.error : null,
+      surfaces: frame.surfaces && typeof frame.surfaces === 'object' ? frame.surfaces : null,
       capabilities: frame.capabilities && typeof frame.capabilities === 'object' ? frame.capabilities : null,
+      observing: frame.observing && typeof frame.observing === 'object' ? frame.observing : null,
       tools: frame.tools.map((tool) => ({
         toolId: tool.toolId,
         name: tool.name,

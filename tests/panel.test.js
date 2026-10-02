@@ -327,6 +327,27 @@ test('the copied JSON keeps a dead-bridge frame and an errored frame instead of 
   assert.equal(errored.error, 'relaying tools failed: Could not serialize message.');
 });
 
+test('the copied JSON keeps a navigator-only frame and what the bridge could observe', async () => {
+  const p = await loadPanel();
+  p.emit({
+    type: 'status', frameId: 0, origin: 'https://legacy.example', bridge: true, hasModelContext: false,
+    surfaces: { document: false, navigator: true }, capabilities: {}, observing: {}, toolCount: 0,
+  });
+  p.emit({
+    type: 'status', frameId: 2, origin: 'https://x', bridge: true, hasModelContext: true,
+    surfaces: { document: true, navigator: false },
+    capabilities: { getTools: false, executeTool: false, registerTool: true },
+    observing: { executeTool: false, registerTool: true }, toolCount: 0,
+  });
+  const payload = await copyPayload(p);
+  const legacy = payload.frames.find((f) => f.frameId === 0);
+  assert.deepEqual(legacy.surfaces, { document: false, navigator: true });
+  assert.deepEqual(legacy.observing, {});
+  const partial = payload.frames.find((f) => f.frameId === 2);
+  assert.deepEqual(partial.surfaces, { document: true, navigator: false });
+  assert.deepEqual(partial.observing, { executeTool: false, registerTool: true });
+});
+
 test('the copied JSON says when the panel is disconnected', async () => {
   const p = await loadPanel();
   p.emit({
