@@ -516,31 +516,45 @@ function findingsFor(frameId, tool) {
   ];
 }
 
-// Serializes the same tool/finding data the table renders and copies it as
-// JSON, so a user auditing a page can file a bug or hand it to a teammate
-// without retyping findings by hand -- the CLI sibling has --json for the
-// same reason.
+// Copies the current audit as JSON, so a user can file a bug or hand it to a
+// teammate without retyping findings -- the CLI sibling has --json for the
+// same reason. It carries the same states the status bar shows: a frame whose
+// bridge never ran, a read error, or a dropped connection must not come out
+// as an empty, clean-looking list.
 function copyFindingsToClipboard() {
-  const payload = flattenTools().map(({ frameId, tool }) => ({
-    frameId,
-    name: tool.name,
-    origin: (toolsByFrame.get(frameId) || {}).origin || '',
-    annotations: tool.annotations,
-    findings: findingsFor(frameId, tool),
-  }));
-  const json = JSON.stringify(payload, null, 2);
+  const frames = [...toolsByFrame.entries()]
+    .sort(([a], [b]) => (a > b ? 1 : a < b ? -1 : 0))
+    .map(([frameId, frame]) => ({
+      frameId,
+      origin: frame.origin || '',
+      bridge: typeof frame.bridge === 'boolean' ? frame.bridge : null,
+      hasModelContext: !!frame.hasModelContext,
+      error: typeof frame.error === 'string' && frame.error ? frame.error : null,
+      capabilities: frame.capabilities && typeof frame.capabilities === 'object' ? frame.capabilities : null,
+      tools: frame.tools.map((tool) => ({
+        toolId: tool.toolId,
+        name: tool.name,
+        title: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        annotations: tool.annotations,
+        findings: findingsFor(frameId, tool),
+      })),
+    }));
   const btn = document.getElementById('copy-findings-btn');
   const original = btn.textContent;
-  navigator.clipboard.writeText(json).then(
-    () => {
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = original; }, 1500);
-    },
-    () => {
-      btn.textContent = 'Copy failed';
-      setTimeout(() => { btn.textContent = original; }, 1500);
-    },
-  );
+  const flash = (text) => {
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  };
+  let json;
+  try {
+    json = JSON.stringify({ generatedAt: new Date().toISOString(), disconnected, frames }, null, 2);
+  } catch (err) {
+    flash('Copy failed');
+    return;
+  }
+  navigator.clipboard.writeText(json).then(() => flash('Copied!'), () => flash('Copy failed'));
 }
 
 function renderToolsTable() {
