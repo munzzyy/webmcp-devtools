@@ -66,32 +66,150 @@ const RISKY_PARAM = /^(?:command|cmd|code|script|shell|exec|sql|query|eval|path|
 // verdict here as from the CLI.
 const UNTRUSTED_CONTENT_TEXT = /\b(?:returns?\s+(?:raw\s+)?html|user[\s-]generated\s+content|user\s+content|third[\s-]party\s+content|scrapes?|crawls?|fetch(?:es|ing|ed)?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|site|content)|reads?\s+(?:a\s+|the\s+)?(?:web\s?page|page|website|url)|retrieves?\s+(?:a\s+|the\s+)?(?:web\s?page|page|url|website|content)|downloads?\s+(?:a\s+|the\s+)?(?:file|page|content|url)|parses?\s+html|external\s+(?:content|data|website|page)|search(?:es)?\s+the\s+web|queries?\s+(?:a\s+|the\s+)?(?:web|internet|search\s+engine))\b/i;
 
+// Cyrillic and Greek letters that render like a Latin one. Folding them lets
+// "ign\u043ere" (with a Cyrillic o) match the injection patterns, and a word
+// that mixes them into Latin letters is flagged on its own. Deliberately
+// small: only letters a reader cannot tell apart from the Latin one.
+const CONFUSABLES = new Map([
+  ['\u0430', 'a'], ['\u0435', 'e'], ['\u043e', 'o'], ['\u0440', 'p'], ['\u0441', 'c'], ['\u0443', 'y'],
+  ['\u0445', 'x'], ['\u0455', 's'], ['\u0456', 'i'], ['\u0458', 'j'], ['\u04bb', 'h'], ['\u04cf', 'l'],
+  ['\u0501', 'd'], ['\u051b', 'q'], ['\u051d', 'w'],
+  ['\u0410', 'A'], ['\u0412', 'B'], ['\u0415', 'E'], ['\u041a', 'K'], ['\u041c', 'M'], ['\u041d', 'H'],
+  ['\u041e', 'O'], ['\u0420', 'P'], ['\u0421', 'C'], ['\u0422', 'T'], ['\u0425', 'X'], ['\u0405', 'S'],
+  ['\u0406', 'I'], ['\u0408', 'J'], ['\u04ae', 'Y'], ['\u04c0', 'I'], ['\u051a', 'Q'], ['\u051c', 'W'],
+  ['\u03b1', 'a'], ['\u03b9', 'i'], ['\u03ba', 'k'], ['\u03bd', 'v'], ['\u03bf', 'o'], ['\u03c1', 'p'],
+  ['\u03c5', 'u'], ['\u03c7', 'x'],
+  ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0396', 'Z'], ['\u0397', 'H'], ['\u0399', 'I'],
+  ['\u039a', 'K'], ['\u039c', 'M'], ['\u039d', 'N'], ['\u039f', 'O'], ['\u03a1', 'P'], ['\u03a4', 'T'],
+  ['\u03a5', 'Y'], ['\u03a7', 'X'],
+]);
+const GREEK_OR_CYRILLIC = /[\u0370-\u03ff\u0400-\u052f]/;
+const LATIN_LETTER = /\p{Script=Latin}/u;
+const WORD = /[\p{L}\p{M}]+/gu;
+
+function foldConfusables(text) {
+  if (!GREEK_OR_CYRILLIC.test(text)) return text;
+  let out = '';
+  for (const ch of text) out += CONFUSABLES.get(ch) ?? ch;
+  return out;
+}
+
+function mixedScriptWord(text) {
+  if (!GREEK_OR_CYRILLIC.test(text)) return null;
+  for (const match of text.matchAll(WORD)) {
+    let latin = false;
+    let lookalike = null;
+    for (const ch of match[0]) {
+      if (CONFUSABLES.has(ch)) lookalike = lookalike || ch;
+      else if (LATIN_LETTER.test(ch)) latin = true;
+    }
+    if (latin && lookalike) return { word: match[0], lookalike };
+  }
+  return null;
+}
+
+// NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
+// fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII, so a
+// phrase spelled in look-alike Unicode reads the same as the plain one. Then
+// the Cyrillic/Greek look-alike fold, then a separator-folded copy of each:
+// attackers break naive keyword regexes with markdown, underscores, or dashes
+// ("ignore** previous", "ignore-previous", "_ignore previous") while the
+// phrase stays readable to the agent. Only those glue characters and
+// whitespace fold. Sentence punctuation (.,;:) stays a hard boundary so a
+// comma- or period-separated word list ("Flags: ignore, previous,
+// instructions") is not misread as a running phrase.
+function injectionHits(text) {
+  const normalized = String(text).normalize('NFKC');
+  const variants = [normalized];
+  const folded = foldConfusables(normalized);
+  if (folded !== normalized) variants.push(folded);
+  for (const v of [...variants]) variants.push(v.replace(/[\s_*~`-]+/g, ' '));
+  return INJECTION_PATTERNS.filter(([rx]) => variants.some((v) => rx.test(v)));
+}
+
+// Text the endpoint and credential patterns run on. NFKC turns "webhook.site"
+// spelled in fullwidth letters back into the plain host the agent would read.
+function patternText(text) {
+  return foldConfusables(String(text).normalize('NFKC'));
+}
+
+// Characters that render as nothing. U+3164, U+115F, U+1160 and U+FFA0 are
+// Hangul fillers, U+180E the old Mongolian vowel separator, and U+034F the
+// combining grapheme joiner; outside the scripts that use them they only
+// hide or break up text.
+const INVISIBLE = new Set([0x200b, 0x200c, 0x200d, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xfeff, 0x00ad,
+  0x3164, 0x115f, 0x1160, 0xffa0, 0x180e, 0x034f]);
+// Letters only: U+061C itself counts as Arabic script, so the mark alone
+// must not satisfy the check.
+const RTL_LETTER = /[\p{L}&&[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Samaritan}\p{Script=Mandaic}\p{Script=Adlam}\p{Script=Hanifi_Rohingya}\p{Script=Yezidi}]]/v;
+const EMOJI_BASE = /\p{Extended_Pictographic}/u;
+const IDEOGRAPH = /\p{Ideographic}/u;
+
+function isVariationSelector(cp) {
+  return (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xe0100 && cp <= 0xe01ef);
+}
+
+// A variation selector picks the glyph of the character right before it: an
+// emoji (U+2764 U+FE0F is the red heart), a keycap digit, or a CJK
+// ideograph (U+E0100 and up). One anywhere else, or a run of them, is the
+// carrier for text hidden as variation-selector bytes.
+function variationSelectorAllowed(cps, i) {
+  const cp = cps[i];
+  const prev = i > 0 ? cps[i - 1] : -1;
+  if (prev < 0 || isVariationSelector(prev)) return false;
+  const prevCh = String.fromCodePoint(prev);
+  if (cp >= 0xe0100) return IDEOGRAPH.test(prevCh);
+  if (EMOJI_BASE.test(prevCh) || IDEOGRAPH.test(prevCh)) return true;
+  return (cp === 0xfe0f || cp === 0xfe0e) && /^[0-9#*]$/.test(prevCh) && cps[i + 1] === 0x20e3;
+}
+
+function isControl(cp) {
+  return (cp < 0x20 && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) || (cp >= 0x7f && cp <= 0x9f);
+}
+
 // Invisible / deceptive Unicode. `path` narrows the finding to an exact spot
 // inside a larger field (e.g. a schema property description); the title keeps
 // the coarse field name so repeats of one payload dedupe to a single finding.
 function scanUnicode(field, text, path) {
   const at = path ? `At ${path}: ` : '';
   const out = [];
-  let index = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0);
+  const cps = Array.from(text, (ch) => ch.codePointAt(0));
+  let hasRtl = null;
+  for (let i = 0; i < cps.length; i += 1) {
+    const cp = cps[i];
     // A U+FEFF at the very start is a byte-order mark -- a benign (if
     // pointless) string lead-in, not a hidden separator. Only flag it mid-text.
-    if (cp === 0xfeff && index === 0) {
-      index += 1;
-      continue;
-    }
+    if (cp === 0xfeff && i === 0) continue;
     if (cp >= 0xe0000 && cp <= 0xe007f) {
       out.push(finding('uni-tag', 'critical', `Invisible Unicode tag character in ${field}`,
         `${at}U+${hex(cp)} is an invisible tag character, the standard way to smuggle hidden instructions into text the agent reads but a human does not.`));
     } else if ((cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069)) {
       out.push(finding('uni-bidi', 'critical', `Bidirectional control character in ${field}`,
         `${at}U+${hex(cp)} can make the rendered text differ from what is parsed (Trojan Source).`));
-    } else if (cp === 0x200b || cp === 0x200c || cp === 0x200d || cp === 0x2060 || (cp >= 0x2061 && cp <= 0x2064) || cp === 0xfeff || cp === 0x00ad) {
+    } else if (INVISIBLE.has(cp)) {
       out.push(finding('uni-zw', 'high', `Zero-width / invisible character in ${field}`,
         `${at}U+${hex(cp)} is invisible and is often used to hide or break up text so a reviewer misses it.`));
+    } else if (cp === 0x200e || cp === 0x200f || cp === 0x061c) {
+      if (hasRtl === null) hasRtl = RTL_LETTER.test(text);
+      if (!hasRtl) {
+        out.push(finding('uni-zw', 'high', `Directional mark with no right-to-left text in ${field}`,
+          `${at}U+${hex(cp)} is an invisible direction mark, and this text has no right-to-left script for it to help with. Here it only hides or breaks up text.`));
+      }
+    } else if (isVariationSelector(cp)) {
+      if (!variationSelectorAllowed(cps, i)) {
+        out.push(finding('uni-vs', 'high', `Stray variation selector in ${field}`,
+          `${at}U+${hex(cp)} is an invisible variation selector that is not styling an emoji or ideograph. Runs of them can carry hidden text that a reviewer never sees.`));
+      }
+    } else if (isControl(cp)) {
+      out.push(finding('uni-control', 'high', `Control character in ${field}`,
+        `${at}U+${hex(cp)} is a control character. It has no place in tool text, and some of them (ESC, for one) can drive the terminal that displays it.`));
     }
-    index += 1;
+  }
+  const mixed = mixedScriptWord(text);
+  if (mixed) {
+    const shown = mixed.word.length > 40 ? `${mixed.word.slice(0, 37)}...` : mixed.word;
+    out.push(finding('uni-confusable', 'medium', `Mixed-script look-alike word in ${field}`,
+      `${at}"${shown}" mixes Latin letters with a Cyrillic or Greek look-alike (U+${hex(mixed.lookalike.codePointAt(0))}). It reads the same to a person and to the agent, but slips past keyword filters.`));
   }
   return dedupeByTitle(out);
 }
@@ -286,23 +404,8 @@ export function lintTool(tool) {
   // Name, title and description are the strings the agent actually reads, so
   // injection phrasing there lands directly in its context.
   for (const [fieldName, value] of [['name', nameScan], ['title', titleScan], ['description', descScan]]) {
-    // NFKC first: it maps fullwidth/compatibility Unicode variants (e.g. the
-    // fullwidth "ｉｇｎｏｒｅ" and an ideographic space) down to plain ASCII,
-    // so a phrase spelled in look-alike Unicode reads the same as the plain
-    // one. Then match a separator-folded copy too: attackers break naive
-    // keyword regexes with markdown, underscores, or dashes ("ignore**
-    // previous", "ignore-previous", "_ignore previous") while the phrase
-    // stays readable to the agent. Fold only those glue characters and
-    // whitespace -- keep sentence punctuation (.,;:) as a hard boundary so a
-    // comma- or period-separated word list ("Flags: ignore, previous,
-    // instructions") is not misread as a running phrase. Findings still
-    // report the tool's original field value.
-    const normalized = String(value).normalize('NFKC');
-    const folded = normalized.replace(/[\s_*~`-]+/g, ' ');
-    for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
-      if (rx.test(normalized) || rx.test(folded)) {
-        findings.push(finding('inject', severity, `${title} (${fieldName})`, detail));
-      }
+    for (const [, severity, title, detail] of injectionHits(value)) {
+      findings.push(finding('inject', severity, `${title} (${fieldName})`, detail));
     }
   }
 
@@ -320,24 +423,20 @@ export function lintTool(tool) {
   const { strings: schemaStrings, truncated: schemaWalkTruncated } = collectSchemaStrings(schema, MAX_SCAN);
   const schemaFindings = [];
   for (const { path, text } of schemaStrings) {
-    const normalized = String(text).normalize('NFKC');
-    const folded = normalized.replace(/[\s_*~`-]+/g, ' ');
-    for (const [rx, severity, title, detail] of INJECTION_PATTERNS) {
-      if (rx.test(normalized) || rx.test(folded)) {
-        schemaFindings.push(finding('inject', severity, `${title} (inputSchema)`, `At ${path}: ${detail}`));
-      }
+    for (const [, severity, title, detail] of injectionHits(text)) {
+      schemaFindings.push(finding('inject', severity, `${title} (inputSchema)`, `At ${path}: ${detail}`));
     }
     schemaFindings.push(...scanUnicode('inputSchema', text, path));
   }
   findings.push(...dedupeByTitle(schemaFindings));
 
-  const sinkHit = SINK.exec(titleScan) || SINK.exec(descScan) || SINK.exec(schemaScan);
+  const sinkHit = SINK.exec(patternText(titleScan)) || SINK.exec(patternText(descScan)) || SINK.exec(patternText(schemaScan));
   if (sinkHit) {
     findings.push(finding('sink', 'high', 'References a data-collection endpoint',
       `Mentions "${sinkHit[0]}", a paste/webhook/tunnel endpoint whose purpose is receiving data out-of-band.`));
   }
 
-  if (SECRET.test(titleScan) || SECRET.test(descScan) || SECRET.test(schemaScan)) {
+  if (SECRET.test(patternText(titleScan)) || SECRET.test(patternText(descScan)) || SECRET.test(patternText(schemaScan))) {
     findings.push(finding('secret', 'high', 'Possible hardcoded credential in tool metadata',
       'A credential-shaped string appears in the tool description or schema. Anything shipped in page source is exposed.'));
   }
