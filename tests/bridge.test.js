@@ -214,6 +214,81 @@ test('an agent-style direct handler call on a registered tool is observed exactl
   assert.equal(b.ofType('observedCall').length, 1);
 });
 
+// Each one threw "Cannot assign to read only property 'execute'" inside the page's own registerTool call.
+const readOnlyExecuteDescriptors = (calls) => {
+  const handler = (label) => async function execute(args) {
+    calls.push({ label, self: this, args });
+    return { ran: label };
+  };
+  const getterExecute = { ...tool('getterTool') };
+  delete getterExecute.execute;
+  const getterHandler = handler('getterTool');
+  Object.defineProperty(getterExecute, 'execute', { get: () => getterHandler, enumerable: true });
+  const nonWritable = { ...tool('nonWritableTool') };
+  Object.defineProperty(nonWritable, 'execute', { value: handler('nonWritableTool'), writable: false, enumerable: true });
+  return [
+    Object.freeze({ ...tool('frozenTool'), execute: handler('frozenTool') }),
+    getterExecute,
+    nonWritable,
+  ];
+};
+
+test('frozen, getter-execute and read-only-execute descriptors still register, and calls to them are observed once', async () => {
+  const mc = specModelContext([]);
+  const b = loadBridge({ modelContext: mc });
+  await b.flush();
+  const calls = [];
+  const descriptors = readOnlyExecuteDescriptors(calls);
+  for (const desc of descriptors) {
+    await assert.doesNotReject(async () => b.document.modelContext.registerTool(desc));
+  }
+  await b.flush();
+  const names = ['frozenTool', 'getterTool', 'nonWritableTool'];
+  assert.deepEqual((await mc.getTools()).map((t) => t.name), names);
+  assert.deepEqual([...b.ofType('tools').pop().tools.map((t) => t.name)], names);
+  assert.ok(Object.isFrozen((await mc.getTools())[0]), 'a frozen descriptor stays frozen in the registry');
+
+  for (const name of names) {
+    b.posted.length = 0;
+    calls.length = 0;
+    await b.document.modelContext.executeTool({ name }, { via: 'executeTool' });
+    await b.flush();
+    assert.equal(b.ofType('observedCall').length, 1, `${name} via executeTool`);
+    assert.equal(calls.length, 1);
+
+    // The agent path: the registry's own handler, called directly.
+    b.posted.length = 0;
+    calls.length = 0;
+    const registered = (await mc.getTools()).find((t) => t.name === name);
+    await registered.execute({ via: 'handler' });
+    await b.flush();
+    const observed = b.ofType('observedCall');
+    assert.equal(observed.length, 1, `${name} via its handler: ${JSON.stringify(observed)}`);
+    assert.equal(observed[0].toolName, name);
+    assert.equal(observed[0].argsJson, '{"via":"handler"}');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].self, descriptors[names.indexOf(name)], 'the handler sees the page\'s own descriptor as this');
+  }
+  b.send({ type: 'getTools' });
+  await b.flush();
+  assert.equal(b.ofType('status').pop().observing.unwrappedHandlers, 0);
+});
+
+test('a descriptor the bridge cannot copy still registers, and the status says its calls go unseen', async () => {
+  const mc = specModelContext([]);
+  const b = loadBridge({ modelContext: mc });
+  await b.flush();
+  const target = tool('proxiedTool');
+  const hostile = new Proxy(target, {
+    set: () => false,
+    ownKeys: () => { throw new Error('no keys for you'); },
+  });
+  await assert.doesNotReject(async () => b.document.modelContext.registerTool(hostile));
+  await b.flush();
+  assert.deepEqual((await mc.getTools()).map((t) => t.name), ['proxiedTool']);
+  assert.equal(b.ofType('status').pop().observing.unwrappedHandlers, 1);
+});
+
 test('a registerTool-only build (no getTools) still enumerates observed registrations', async () => {
   const listeners = [];
   const mc = {

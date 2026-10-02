@@ -20,7 +20,7 @@ Plain JavaScript. No build step, no bundler, no framework, no runtime dependenci
 
 ### What the timeline can and cannot see
 
-The bridge wraps `executeTool` and the `execute` handler of every tool registered through `registerTool` after it loads, so calls through either path show up as `observed call` entries. What it cannot see: calls made before the wrap landed, registrations that happened before the bridge loaded on builds without `getTools()`, and any native agent path that invokes an internal handler reference without going through the page-visible surface. A page can also delete or replace the wrappers; the panel watches for a swapped-out `modelContext` and re-wraps, but a window where calls go unobserved is possible. Treat the timeline as evidence of what happened, never as proof that nothing else did.
+The bridge wraps `executeTool` and the `execute` handler of every tool registered through `registerTool` after it loads, so calls through either path show up as `observed call` entries. What it cannot see: calls made before the wrap landed, registrations that happened before the bridge loaded on builds without `getTools()`, and any native agent path that invokes an internal handler reference without going through the page-visible surface. A page can also delete or replace the wrappers; the panel watches for a swapped-out `modelContext` and re-wraps, but a window where calls go unobserved is possible. A frozen descriptor, or one whose `execute` is read-only, is registered as a wrapped copy, so the page's registration still works. If the bridge can't wrap a handler at all, the status bar says how many it missed. Treat the timeline as evidence of what happened, never as proof that nothing else did.
 
 ## What it lints for
 

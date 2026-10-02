@@ -424,6 +424,13 @@ function statusBarItems() {
     badge('status-warn', `getTools() unavailable${f.origin ? ` in ${f.origin}` : ''}: showing only registrations observed since the bridge loaded, not a full listing.`);
   }
 
+  for (const f of liveFrames) {
+    const n = f.observing && typeof f.observing.unwrappedHandlers === 'number' ? f.observing.unwrappedHandlers : 0;
+    if (n > 0) {
+      badge('status-warn', `${n} tool handler${n === 1 ? '' : 's'} could not be wrapped${f.origin ? ` in ${f.origin}` : ''}: calls that go straight to ${n === 1 ? 'it' : 'them'} do not show in the timeline.`);
+    }
+  }
+
   // A frame that reported an error reading its tools would otherwise be
   // indistinguishable from a frame that genuinely has zero -- surface it so
   // "present (0 tools)" is never mistaken for "tools read successfully".

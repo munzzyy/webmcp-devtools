@@ -51,6 +51,7 @@
   let wrappedTarget = null;
   let observingExecute = false;
   let observingRegister = false;
+  let unwrappedHandlers = 0; // registered handlers the bridge could not wrap, so direct calls to them go unseen
   const trackedRegistrations = []; // descriptors seen via registerTool, for getTools-less builds
   let panelCallDepth = 0; // panel-initiated executions report via executeResult, not observedCall
   let handlerSuppressDepth = 0; // an observed executeTool call must not double-log via the handler wrapper
@@ -101,7 +102,7 @@
       hasModelContext: !!doc,
       surfaces: { document: !!doc, navigator: !!nav },
       capabilities: capabilitiesOf(doc),
-      observing: { executeTool: observingExecute, registerTool: observingRegister },
+      observing: { executeTool: observingExecute, registerTool: observingRegister, unwrappedHandlers },
       toolCount: toolCache.size,
     });
   }
@@ -250,6 +251,7 @@
     wrappedTarget = mc;
     observingExecute = false;
     observingRegister = false;
+    unwrappedHandlers = 0;
 
     try {
       if (typeof mc.addEventListener === 'function') {
@@ -284,9 +286,9 @@
       const originalRegister = mc.registerTool;
       if (typeof originalRegister === 'function') {
         const wrapped = function registerTool(descriptor, options) {
-          instrumentDescriptor(descriptor);
-          trackRegistration(descriptor, options);
-          return originalRegister.call(mc, descriptor, options);
+          const registered = instrumentDescriptor(descriptor);
+          trackRegistration(registered, options);
+          return originalRegister.call(mc, registered, options);
         };
         mc.registerTool = wrapped;
         observingRegister = mc.registerTool === wrapped;
@@ -301,12 +303,48 @@
     void announceTools();
   }
 
+  // Returns what to register: the descriptor wrapped in place, or a wrapped copy when its execute is read-only.
   function instrumentDescriptor(descriptor) {
-    if (!descriptor || typeof descriptor !== 'object' || typeof descriptor.execute !== 'function') return;
-    const original = descriptor.execute;
-    descriptor.execute = function execute(...args) {
+    if (!descriptor || typeof descriptor !== 'object') return descriptor;
+    let original;
+    try {
+      original = descriptor.execute;
+    } catch (err) {
+      return descriptor;
+    }
+    if (typeof original !== 'function') return descriptor;
+    const inPlace = function execute(...args) {
       return observeHandlerCall(descriptor, original, this, args);
     };
+    try {
+      descriptor.execute = inPlace;
+      if (descriptor.execute === inPlace) return descriptor;
+    } catch (err) {
+      // frozen, or execute is a getter or non-writable
+    }
+    try {
+      return wrappedCopy(descriptor, original);
+    } catch (err) {
+      unwrappedHandlers += 1;
+      announceStatus();
+      return descriptor;
+    }
+  }
+
+  // Same prototype and own properties, so the page's registry gets an equivalent descriptor.
+  function wrappedCopy(descriptor, original) {
+    const props = Object.getOwnPropertyDescriptors(descriptor);
+    let copy = null;
+    const execute = function execute(...args) {
+      return observeHandlerCall(descriptor, original, this === copy ? descriptor : this, args);
+    };
+    const existing = props.execute;
+    props.execute = { value: execute, writable: true, enumerable: existing ? existing.enumerable : true, configurable: true };
+    copy = Object.create(Object.getPrototypeOf(descriptor), props);
+    if (Object.isFrozen(descriptor)) Object.freeze(copy);
+    else if (Object.isSealed(descriptor)) Object.seal(copy);
+    else if (!Object.isExtensible(descriptor)) Object.preventExtensions(copy);
+    return copy;
   }
 
   function trackRegistration(descriptor, options) {

@@ -498,3 +498,16 @@ test('the live status bar is left alone when its text has not changed', async ()
   assert.ok(p.text('status-bar').includes('Error reading tools'), p.text('status-bar'));
   assert.notEqual(bar.children[0], before[0]);
 });
+
+test('a frame with handlers the bridge could not wrap says its timeline has a gap', async () => {
+  const p = await loadPanel();
+  const status = (unwrappedHandlers) => ({
+    type: 'status', frameId: 0, origin: 'https://x', bridge: true, hasModelContext: true,
+    surfaces: { document: true, navigator: false }, capabilities: { getTools: true, executeTool: true, registerTool: true },
+    observing: { executeTool: true, registerTool: true, unwrappedHandlers }, toolCount: 0,
+  });
+  p.emit(status(0));
+  assert.ok(!p.text('status-bar').includes('could not be wrapped'), p.text('status-bar'));
+  p.emit(status(2));
+  assert.ok(p.text('status-bar').includes('2 tool handlers could not be wrapped in https://x'), p.text('status-bar'));
+});

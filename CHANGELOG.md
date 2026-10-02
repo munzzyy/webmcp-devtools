@@ -7,6 +7,7 @@ Changes on main since [v0.2.0](https://github.com/munzzyy/webmcp-devtools/compar
 - The license is now GPL-3.0-or-later. Releases up to v0.2.0 stay under MIT.
 - A "Copy findings as JSON" button copies the whole audit to the clipboard. It lists every frame with its bridge health and read errors, and every tool with its full definition and findings. A frame the panel could not inspect never reads as clean.
 - Two lint rules from the webmcp-lint CLI: a tool that handles outside content without `untrustedContentHint`, and Chrome's size budgets for names and descriptions.
+- A page that freezes its tool descriptors, or makes `execute` read-only, no longer gets an error from `registerTool` just because the extension is installed. Calls to those tools still show in the timeline.
 - A tool with a BigInt or a circular reference in it no longer hides the rest of its frame's tool list. It shows up with a finding that says it could not be relayed intact.
 - The linter scans every string and key in the input schema and the tool's title. It used to read only descriptions and a few other keys.
 - Closed several ways to hide text from the linter with Unicode, such as look-alike letters and invisible characters it did not know about.

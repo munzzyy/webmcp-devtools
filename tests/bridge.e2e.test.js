@@ -334,6 +334,7 @@ test('MAIN-world bridge sees a page-installed modelContext in real Chrome', asyn
     assert.deepEqual(throws, [], 'the Port refused a message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*countItems/.test(dom), 'countItems never reached the Port in a tools message' + seen);
     assert.ok(/E2EPORT\|ok:tools:[^<:]*tallyItems/.test(dom), 'tallyItems never reached the Port in a tools message' + seen);
+    assert.ok(/E2EPORT\|ok:tools:[^<:]*frozenTool/.test(dom), 'the frozen descriptor never registered' + seen);
   } finally {
     server.close();
     removeQuietly(t, tmp);

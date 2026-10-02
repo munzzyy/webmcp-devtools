@@ -81,6 +81,19 @@
           document.modelContext.executeTool({ name: 'getInventory' }, { limit: 2 });
         }, 900);
 
+        // Registered after the wrap, so the bridge's registerTool wrapper must not make it throw.
+        setTimeout(() => {
+          document.modelContext.registerTool(Object.freeze({
+            name: 'frozenTool',
+            description: 'A tool whose descriptor the page froze.',
+            inputSchema: { type: 'object', properties: {} },
+            annotations: { readOnlyHint: true },
+            async execute() {
+              return { frozen: true };
+            },
+          }));
+        }, 1200);
+
         // Late registration goes through the wrapped registerTool and fires
         // toolchange, so the tool list update must be relayed too.
         setTimeout(() => {
